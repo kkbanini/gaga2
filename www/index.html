@@ -1,0 +1,658 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<!--
+  viewport-fit=cover + user-scalable=no keep the page from zooming/scrolling
+  on mobile so touch drags always control the joysticks, never the browser.
+-->
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Tank Arena</title>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;         /* no scrolling/bouncing on mobile */
+    background: #12141a;
+    touch-action: none;       /* stop the OS from treating drags as pan/zoom */
+    -webkit-user-select: none;
+    user-select: none;
+    overscroll-behavior: none;
+  }
+  #game {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    display: block;
+    touch-action: none;
+  }
+  /* Simple "rotate device" hint shown only in narrow portrait phone widths.
+     Gameplay still works in portrait (see Section 1 of the JS), this is
+     just a nudge toward the preferred landscape orientation. */
+  #rotateHint {
+    position: fixed;
+    inset: 0;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    background: rgba(10,10,14,0.92);
+    color: #fff;
+    font: 600 18px/1.4 -apple-system, system-ui, sans-serif;
+    text-align: center;
+    z-index: 50;
+    pointer-events: none;
+    padding: 24px;
+  }
+  @media (max-width: 600px) and (orientation: portrait) {
+    #rotateHint { display: flex; }
+  }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<div id="rotateHint">Rotate your device to landscape<br>for the best experience</div>
+
+<script>
+(function () {
+  "use strict";
+
+  // ======================================================================
+  // 1. CANVAS SETUP + RESPONSIVE SCALING
+  //    The backing store is sized in real device pixels (capped at 2x DPR
+  //    so huge canvases don't tank fill-rate on low-end phones) while CSS
+  //    keeps the element itself filling the viewport. Everything else in
+  //    the game reads logical size from `view.w` / `view.h`.
+  // ======================================================================
+  var canvas = document.getElementById("game");
+  var ctx = canvas.getContext("2d");
+
+  var view = { w: 0, h: 0, dpr: 1 };
+
+  function resize() {
+    var dpr = Math.min(window.devicePixelRatio || 1, 2);
+    var w = window.innerWidth;
+    var h = window.innerHeight;
+    view.w = w;
+    view.h = h;
+    view.dpr = dpr;
+    canvas.width = Math.round(w * dpr);
+    canvas.height = Math.round(h * dpr);
+    canvas.style.width = w + "px";
+    canvas.style.height = h + "px";
+    // Draw in logical (CSS) pixels; the transform handles the DPR scaling.
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+  window.addEventListener("resize", resize);
+  window.addEventListener("orientationchange", resize);
+  resize();
+
+  // ======================================================================
+  // 2. WORLD / CONFIG CONSTANTS
+  // ======================================================================
+  var WORLD = { w: 3000, h: 3000 };
+  var GRID_SIZE = 100;
+
+  var PLAYER_BASE = {
+    radius: 22,
+    maxHp: 100,
+    accel: 900,      // px/s^2 - how fast the tank speeds up
+    friction: 6,      // higher = stops quicker when joystick released
+    maxSpeed: 260,
+    fireCooldown: 0.22,
+    bulletDamage: 12,
+    bulletSpeed: 620,
+    bulletRadius: 7,
+    bulletLife: 0.9,
+    contactDamage: 10,
+    hitCooldown: 0.5   // invulnerability window after taking contact damage
+  };
+
+  var SHAPE_TYPES = {
+    triangle: { sides: 3, hp: 18,  xp: 12, radius: 16, color: "#e05353", rot: 1.6 },
+    square:   { sides: 4, hp: 45,  xp: 25, radius: 20, color: "#e0c740", rot: 0.9 },
+    pentagon: { sides: 5, hp: 110, xp: 70, radius: 30, color: "#4d8fe0", rot: 0.5 }
+  };
+  var MAX_SHAPES = 40;
+  var SHAPE_RESPAWN_INTERVAL = 1.2; // seconds between respawn attempts while under cap
+
+  var CAMERA_SMOOTH = 4.5; // higher = snappier follow, lower = laggier/smoother
+
+  // ======================================================================
+  // 3. INPUT: DUAL VIRTUAL JOYSTICKS + DESKTOP FALLBACK
+  //    Touch handling uses raw Touch events (not Pointer events) tracked by
+  //    identifier so both joysticks can be dragged simultaneously - this is
+  //    the part Pointer/mouse emulation on some mobile browsers gets wrong
+  //    when two fingers are down at once.
+  // ======================================================================
+  function makeStick(deadzone) {
+    return {
+      active: false,
+      touchId: null,
+      originX: 0, originY: 0,   // where the thumb first touched (floating base)
+      knobX: 0, knobY: 0,       // current knob screen position
+      dx: 0, dy: 0,             // normalized -1..1 output
+      mag: 0,                   // 0..1 magnitude
+      deadzone: deadzone,
+      maxRadius: 55
+    };
+  }
+  var moveStick = makeStick(0.15);
+  var aimStick = makeStick(0.2);
+
+  function updateStickFromPoint(stick, x, y) {
+    var dx = x - stick.originX;
+    var dy = y - stick.originY;
+    var dist = Math.sqrt(dx * dx + dy * dy);
+    var clamped = Math.min(dist, stick.maxRadius);
+    var angle = Math.atan2(dy, dx);
+    stick.knobX = stick.originX + Math.cos(angle) * clamped;
+    stick.knobY = stick.originY + Math.sin(angle) * clamped;
+    var norm = clamped / stick.maxRadius; // 0..1
+    if (norm < stick.deadzone) {
+      stick.dx = 0; stick.dy = 0; stick.mag = 0;
+    } else {
+      stick.dx = Math.cos(angle);
+      stick.dy = Math.sin(angle);
+      stick.mag = norm;
+    }
+  }
+
+  function resetStick(stick) {
+    stick.active = false;
+    stick.touchId = null;
+    stick.dx = 0; stick.dy = 0; stick.mag = 0;
+  }
+
+  function beginStick(stick, x, y) {
+    stick.active = true;
+    stick.originX = x;
+    stick.originY = y;
+    stick.knobX = x;
+    stick.knobY = y;
+    stick.dx = 0; stick.dy = 0; stick.mag = 0;
+  }
+
+  canvas.addEventListener("touchstart", function (e) {
+    e.preventDefault();
+    var touches = e.changedTouches;
+    for (var i = 0; i < touches.length; i++) {
+      var t = touches[i];
+      // Left half of screen = movement stick, right half = aim/fire stick.
+      var isLeft = t.clientX < view.w / 2;
+      if (isLeft && !moveStick.active) {
+        moveStick.touchId = t.identifier;
+        beginStick(moveStick, t.clientX, t.clientY);
+      } else if (!isLeft && !aimStick.active) {
+        aimStick.touchId = t.identifier;
+        beginStick(aimStick, t.clientX, t.clientY);
+      }
+    }
+  }, { passive: false });
+
+  canvas.addEventListener("touchmove", function (e) {
+    e.preventDefault();
+    var touches = e.changedTouches;
+    for (var i = 0; i < touches.length; i++) {
+      var t = touches[i];
+      if (moveStick.active && t.identifier === moveStick.touchId) {
+        updateStickFromPoint(moveStick, t.clientX, t.clientY);
+      } else if (aimStick.active && t.identifier === aimStick.touchId) {
+        updateStickFromPoint(aimStick, t.clientX, t.clientY);
+      }
+    }
+  }, { passive: false });
+
+  function handleTouchEnd(e) {
+    e.preventDefault();
+    var touches = e.changedTouches;
+    for (var i = 0; i < touches.length; i++) {
+      var t = touches[i];
+      if (moveStick.active && t.identifier === moveStick.touchId) resetStick(moveStick);
+      if (aimStick.active && t.identifier === aimStick.touchId) resetStick(aimStick);
+    }
+  }
+  canvas.addEventListener("touchend", handleTouchEnd, { passive: false });
+  canvas.addEventListener("touchcancel", handleTouchEnd, { passive: false });
+
+  // --- Desktop fallback: WASD to move, mouse to aim, mouse-down to fire ---
+  var keys = {};
+  window.addEventListener("keydown", function (e) { keys[e.key.toLowerCase()] = true; });
+  window.addEventListener("keyup", function (e) { keys[e.key.toLowerCase()] = false; });
+
+  var mouse = { x: 0, y: 0, down: false };
+  canvas.addEventListener("mousemove", function (e) {
+    mouse.x = e.clientX; mouse.y = e.clientY;
+  });
+  canvas.addEventListener("mousedown", function (e) { mouse.down = true; });
+  window.addEventListener("mouseup", function (e) { mouse.down = false; });
+
+  // ======================================================================
+  // 4. ENTITY FACTORIES
+  // ======================================================================
+  function randRange(a, b) { return a + Math.random() * (b - a); }
+
+  function makePlayer() {
+    return {
+      x: WORLD.w / 2,
+      y: WORLD.h / 2,
+      vx: 0, vy: 0,
+      radius: PLAYER_BASE.radius,
+      hp: PLAYER_BASE.maxHp,
+      maxHp: PLAYER_BASE.maxHp,
+      turretAngle: 0,
+      fireTimer: 0,
+      hitTimer: 0,
+      level: 1,
+      xp: 0,
+      xpToNext: 100
+    };
+  }
+  var player = makePlayer();
+
+  function spawnShape() {
+    var keys = Object.keys(SHAPE_TYPES);
+    var typeKey = keys[Math.floor(Math.random() * keys.length)];
+    var def = SHAPE_TYPES[typeKey];
+    return {
+      type: typeKey,
+      x: randRange(def.radius, WORLD.w - def.radius),
+      y: randRange(def.radius, WORLD.h - def.radius),
+      radius: def.radius,
+      hp: def.hp,
+      maxHp: def.hp,
+      rotation: randRange(0, Math.PI * 2),
+      rotSpeed: def.rot * (Math.random() < 0.5 ? 1 : -1)
+    };
+  }
+
+  var shapes = [];
+  for (var i = 0; i < MAX_SHAPES; i++) shapes.push(spawnShape());
+  var shapeRespawnTimer = 0;
+
+  var bullets = []; // pooled-by-reuse array of {x,y,vx,vy,life}
+
+  function fireBullet() {
+    var speed = PLAYER_BASE.bulletSpeed;
+    var tipX = player.x + Math.cos(player.turretAngle) * (player.radius + 10);
+    var tipY = player.y + Math.sin(player.turretAngle) * (player.radius + 10);
+    bullets.push({
+      x: tipX,
+      y: tipY,
+      vx: Math.cos(player.turretAngle) * speed,
+      vy: Math.sin(player.turretAngle) * speed,
+      life: PLAYER_BASE.bulletLife,
+      radius: PLAYER_BASE.bulletRadius
+    });
+  }
+
+  // ======================================================================
+  // 5. CAMERA - lerps toward the player each frame instead of snapping,
+  //    which is what gives the "smooth follow" feel requested.
+  // ======================================================================
+  var camera = { x: player.x, y: player.y };
+
+  function updateCamera(dt) {
+    var t = 1 - Math.exp(-CAMERA_SMOOTH * dt); // frame-rate independent lerp factor
+    camera.x += (player.x - camera.x) * t;
+    camera.y += (player.y - camera.y) * t;
+  }
+
+  // ======================================================================
+  // 6. UPDATE LOGIC
+  // ======================================================================
+  function clamp(v, min, max) { return v < min ? min : (v > max ? max : v); }
+
+  function updatePlayer(dt) {
+    // --- movement: combine touch joystick + desktop WASD fallback ---
+    var mx = moveStick.mag > 0 ? moveStick.dx * moveStick.mag : 0;
+    var my = moveStick.mag > 0 ? moveStick.dy * moveStick.mag : 0;
+    if (mx === 0 && my === 0) {
+      var kx = (keys["d"] ? 1 : 0) - (keys["a"] ? 1 : 0);
+      var ky = (keys["s"] ? 1 : 0) - (keys["w"] ? 1 : 0);
+      var klen = Math.sqrt(kx * kx + ky * ky);
+      if (klen > 0) { mx = kx / klen; my = ky / klen; }
+    }
+
+    player.vx += mx * PLAYER_BASE.accel * dt;
+    player.vy += my * PLAYER_BASE.accel * dt;
+
+    // Exponential friction/drag (frame-rate independent) so the tank glides
+    // to a stop rather than halting instantly - gives it a "tank" feel.
+    var drag = Math.exp(-PLAYER_BASE.friction * dt);
+    player.vx *= drag;
+    player.vy *= drag;
+
+    var speed = Math.sqrt(player.vx * player.vx + player.vy * player.vy);
+    if (speed > PLAYER_BASE.maxSpeed) {
+      var scale = PLAYER_BASE.maxSpeed / speed;
+      player.vx *= scale; player.vy *= scale;
+    }
+
+    player.x = clamp(player.x + player.vx * dt, player.radius, WORLD.w - player.radius);
+    player.y = clamp(player.y + player.vy * dt, player.radius, WORLD.h - player.radius);
+
+    // --- aiming + auto-fire: touch joystick, else mouse ---
+    var aiming = false;
+    if (aimStick.mag > aimStick.deadzone) {
+      player.turretAngle = Math.atan2(aimStick.dy, aimStick.dx);
+      aiming = true;
+    } else if (mouse.down) {
+      var screenPX = player.x - camera.x + view.w / 2;
+      var screenPY = player.y - camera.y + view.h / 2;
+      player.turretAngle = Math.atan2(mouse.y - screenPY, mouse.x - screenPX);
+      aiming = true;
+    }
+
+    player.fireTimer -= dt;
+    if (aiming && player.fireTimer <= 0) {
+      fireBullet();
+      player.fireTimer = PLAYER_BASE.fireCooldown;
+    }
+
+    if (player.hitTimer > 0) player.hitTimer -= dt;
+  }
+
+  function updateBullets(dt) {
+    for (var i = bullets.length - 1; i >= 0; i--) {
+      var b = bullets[i];
+      b.x += b.vx * dt;
+      b.y += b.vy * dt;
+      b.life -= dt;
+      if (b.life <= 0 || b.x < 0 || b.x > WORLD.w || b.y < 0 || b.y > WORLD.h) {
+        bullets.splice(i, 1);
+      }
+    }
+  }
+
+  function updateShapes(dt) {
+    for (var i = 0; i < shapes.length; i++) {
+      shapes[i].rotation += shapes[i].rotSpeed * dt;
+    }
+    // Keep the shape count topped up gradually rather than all at once,
+    // so respawns don't visibly pop in as a batch.
+    shapeRespawnTimer -= dt;
+    if (shapeRespawnTimer <= 0) {
+      shapeRespawnTimer = SHAPE_RESPAWN_INTERVAL;
+      if (shapes.length < MAX_SHAPES) shapes.push(spawnShape());
+    }
+  }
+
+  function grantXp(amount) {
+    player.xp += amount;
+    while (player.xp >= player.xpToNext) {
+      player.xp -= player.xpToNext;
+      player.level++;
+      player.xpToNext = Math.round(player.xpToNext * 1.35);
+      // Leveling up grows the tank a little and restores it proportionally,
+      // giving visible progression similar to diep.io's size growth.
+      var hpRatio = player.hp / player.maxHp;
+      player.maxHp = Math.round(PLAYER_BASE.maxHp * (1 + (player.level - 1) * 0.12));
+      player.hp = Math.round(player.maxHp * Math.max(hpRatio, 0.6));
+      player.radius = PLAYER_BASE.radius * (1 + (player.level - 1) * 0.03);
+    }
+  }
+
+  // --- Collision detection: flat circle-vs-circle checks. At this entity
+  // count (dozens of shapes/bullets) a spatial grid would be premature
+  // optimization; O(n*m) is cheap enough per frame. ---
+  function checkCollisions() {
+    // Bullets vs shapes
+    for (var bi = bullets.length - 1; bi >= 0; bi--) {
+      var b = bullets[bi];
+      var hit = false;
+      for (var si = 0; si < shapes.length; si++) {
+        var s = shapes[si];
+        var dx = b.x - s.x, dy = b.y - s.y;
+        var distSq = dx * dx + dy * dy;
+        var minDist = b.radius + s.radius;
+        if (distSq < minDist * minDist) {
+          s.hp -= PLAYER_BASE.bulletDamage;
+          hit = true;
+          if (s.hp <= 0) {
+            grantXp(SHAPE_TYPES[s.type].xp);
+            shapes.splice(si, 1);
+          }
+          break;
+        }
+      }
+      if (hit) bullets.splice(bi, 1);
+    }
+
+    // Player vs shapes: damage (rate-limited) + gentle knockback separation
+    for (var i = 0; i < shapes.length; i++) {
+      var sh = shapes[i];
+      var dx = player.x - sh.x, dy = player.y - sh.y;
+      var dist = Math.sqrt(dx * dx + dy * dy);
+      var minDist = player.radius + sh.radius;
+      if (dist < minDist && dist > 0.0001) {
+        var overlap = minDist - dist;
+        var nx = dx / dist, ny = dy / dist;
+        // Push both apart proportional to overlap - simple elastic separation
+        // rather than a full physics solver.
+        player.x += nx * overlap * 0.5;
+        player.y += ny * overlap * 0.5;
+        sh.x -= nx * overlap * 0.5;
+        sh.y -= ny * overlap * 0.5;
+
+        if (player.hitTimer <= 0) {
+          player.hp -= PLAYER_BASE.contactDamage;
+          player.hitTimer = PLAYER_BASE.hitCooldown;
+          if (player.hp <= 0) respawnPlayer();
+        }
+      }
+    }
+
+    player.x = clamp(player.x, player.radius, WORLD.w - player.radius);
+    player.y = clamp(player.y, player.radius, WORLD.h - player.radius);
+  }
+
+  function respawnPlayer() {
+    // Prototype-friendly: no separate game-over screen, just reset in place
+    // so the core loop (drive/aim/shoot) is always immediately testable.
+    Object.assign(player, makePlayer());
+  }
+
+  // ======================================================================
+  // 7. RENDERING
+  // ======================================================================
+  function worldToScreen(x, y) {
+    return { x: x - camera.x + view.w / 2, y: y - camera.y + view.h / 2 };
+  }
+
+  function drawGrid() {
+    ctx.strokeStyle = "rgba(255,255,255,0.06)";
+    ctx.lineWidth = 1;
+    var startX = Math.floor((camera.x - view.w / 2) / GRID_SIZE) * GRID_SIZE;
+    var startY = Math.floor((camera.y - view.h / 2) / GRID_SIZE) * GRID_SIZE;
+    var endX = camera.x + view.w / 2;
+    var endY = camera.y + view.h / 2;
+    ctx.beginPath();
+    for (var x = startX; x < endX; x += GRID_SIZE) {
+      var p = worldToScreen(x, 0);
+      ctx.moveTo(p.x, 0);
+      ctx.lineTo(p.x, view.h);
+    }
+    for (var y = startY; y < endY; y += GRID_SIZE) {
+      var p2 = worldToScreen(0, y);
+      ctx.moveTo(0, p2.y);
+      ctx.lineTo(view.w, p2.y);
+    }
+    ctx.stroke();
+  }
+
+  function drawWorldBounds() {
+    var topLeft = worldToScreen(0, 0);
+    ctx.strokeStyle = "rgba(255,80,80,0.5)";
+    ctx.lineWidth = 4;
+    ctx.strokeRect(topLeft.x, topLeft.y, WORLD.w, WORLD.h);
+  }
+
+  function drawPolygon(cx, cy, radius, sides, rotation, color) {
+    ctx.beginPath();
+    for (var i = 0; i < sides; i++) {
+      var angle = rotation + (i / sides) * Math.PI * 2;
+      var px = cx + Math.cos(angle) * radius;
+      var py = cy + Math.sin(angle) * radius;
+      if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    }
+    ctx.closePath();
+    ctx.fillStyle = color;
+    ctx.fill();
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = "rgba(0,0,0,0.35)";
+    ctx.stroke();
+  }
+
+  function drawShapes() {
+    for (var i = 0; i < shapes.length; i++) {
+      var s = shapes[i];
+      var p = worldToScreen(s.x, s.y);
+      if (p.x < -60 || p.x > view.w + 60 || p.y < -60 || p.y > view.h + 60) continue; // cull offscreen
+      var def = SHAPE_TYPES[s.type];
+      drawPolygon(p.x, p.y, s.radius, def.sides, s.rotation, def.color);
+      // HP bar only if damaged, mirrors diep.io behavior
+      if (s.hp < s.maxHp) {
+        var barW = s.radius * 2;
+        var ratio = Math.max(s.hp / s.maxHp, 0);
+        ctx.fillStyle = "rgba(0,0,0,0.4)";
+        ctx.fillRect(p.x - barW / 2, p.y - s.radius - 12, barW, 5);
+        ctx.fillStyle = "#4caf50";
+        ctx.fillRect(p.x - barW / 2, p.y - s.radius - 12, barW * ratio, 5);
+      }
+    }
+  }
+
+  function drawBullets() {
+    ctx.fillStyle = "#f2f2f2";
+    for (var i = 0; i < bullets.length; i++) {
+      var b = bullets[i];
+      var p = worldToScreen(b.x, b.y);
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, b.radius, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  function drawPlayer() {
+    var p = worldToScreen(player.x, player.y);
+    // flash while invulnerable after taking a hit
+    var flashing = player.hitTimer > 0 && Math.floor(player.hitTimer * 12) % 2 === 0;
+
+    // Barrel
+    ctx.save();
+    ctx.translate(p.x, p.y);
+    ctx.rotate(player.turretAngle);
+    ctx.fillStyle = "#8fa3b3";
+    ctx.fillRect(0, -7, player.radius + 18, 14);
+    ctx.restore();
+
+    // Body
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, player.radius, 0, Math.PI * 2);
+    ctx.fillStyle = flashing ? "#ffffff" : "#3fb6f0";
+    ctx.fill();
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = "#2a86ad";
+    ctx.stroke();
+
+    // HP bar above the tank
+    var barW = player.radius * 2.2;
+    var ratio = Math.max(player.hp / player.maxHp, 0);
+    ctx.fillStyle = "rgba(0,0,0,0.4)";
+    ctx.fillRect(p.x - barW / 2, p.y - player.radius - 18, barW, 6);
+    ctx.fillStyle = ratio > 0.3 ? "#4caf50" : "#e05353";
+    ctx.fillRect(p.x - barW / 2, p.y - player.radius - 18, barW * ratio, 6);
+  }
+
+  function drawStick(stick, label) {
+    if (!stick.active) return;
+    ctx.beginPath();
+    ctx.arc(stick.originX, stick.originY, stick.maxRadius, 0, Math.PI * 2);
+    ctx.fillStyle = "rgba(255,255,255,0.10)";
+    ctx.fill();
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = "rgba(255,255,255,0.25)";
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.arc(stick.knobX, stick.knobY, 26, 0, Math.PI * 2);
+    ctx.fillStyle = "rgba(255,255,255,0.35)";
+    ctx.fill();
+  }
+
+  function drawHUD() {
+    // HP + level + XP bar, fixed in screen space (drawn outside the camera
+    // transform) so it never scrolls with the world, and positioned as a
+    // fraction of view size so it adapts to any screen/orientation.
+    var pad = 16;
+    var barW = Math.min(280, view.w * 0.4);
+
+    ctx.font = "600 16px -apple-system, system-ui, sans-serif";
+    ctx.fillStyle = "#fff";
+    ctx.fillText("Level " + player.level, pad, pad + 16);
+
+    // XP bar
+    var xpRatio = clamp(player.xp / player.xpToNext, 0, 1);
+    ctx.fillStyle = "rgba(0,0,0,0.4)";
+    ctx.fillRect(pad, pad + 24, barW, 8);
+    ctx.fillStyle = "#f2c14e";
+    ctx.fillRect(pad, pad + 24, barW * xpRatio, 8);
+
+    // HP bar
+    var hpRatio = clamp(player.hp / player.maxHp, 0, 1);
+    ctx.fillStyle = "rgba(0,0,0,0.4)";
+    ctx.fillRect(pad, pad + 40, barW, 10);
+    ctx.fillStyle = hpRatio > 0.3 ? "#4caf50" : "#e05353";
+    ctx.fillRect(pad, pad + 40, barW * hpRatio, 10);
+    ctx.fillStyle = "#fff";
+    ctx.font = "600 11px -apple-system, system-ui, sans-serif";
+    ctx.fillText(Math.max(0, Math.round(player.hp)) + " / " + player.maxHp, pad, pad + 60);
+  }
+
+  function render() {
+    ctx.clearRect(0, 0, view.w, view.h);
+    ctx.fillStyle = "#12141a";
+    ctx.fillRect(0, 0, view.w, view.h);
+
+    drawGrid();
+    drawWorldBounds();
+    drawShapes();
+    drawBullets();
+    drawPlayer();
+
+    drawStick(moveStick);
+    drawStick(aimStick);
+    drawHUD();
+  }
+
+  // ======================================================================
+  // 8. MAIN LOOP
+  //    dt is clamped so a backgrounded tab / dev-tools pause doesn't cause
+  //    a huge simulation step (e.g. tank flying through walls) on resume.
+  // ======================================================================
+  var lastTime = performance.now();
+
+  function frame(now) {
+    var dt = Math.min((now - lastTime) / 1000, 1 / 30);
+    lastTime = now;
+
+    updatePlayer(dt);
+    updateBullets(dt);
+    updateShapes(dt);
+    checkCollisions();
+    updateCamera(dt);
+
+    render();
+
+    requestAnimationFrame(frame);
+  }
+
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
