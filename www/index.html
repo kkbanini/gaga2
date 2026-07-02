@@ -3,6 +3,13 @@
 <head>
 <meta charset="UTF-8">
 <!--
+  Loosened CSP: explicitly allow embedding the game in an iframe (frame-src /
+  child-src), executing inline/blob scripts, and fetching the OTA assets from
+  GitHub Pages (connect-src including https://*.github.io). Kept permissive so a
+  restrictive WebView default can never block the boot / download.
+-->
+<meta http-equiv="Content-Security-Policy" content="default-src * data: blob: 'unsafe-inline' 'unsafe-eval'; script-src * data: blob: 'unsafe-inline' 'unsafe-eval'; style-src * data: blob: 'unsafe-inline'; img-src * data: blob:; font-src * data: blob:; connect-src * data: blob: https://*.github.io; frame-src * data: blob:; child-src * data: blob:;">
+<!--
   OTA BOOTSTRAPPER
   ================
   This is the ONLY file compiled into the APK's shell (plus a bundled fallback
@@ -126,6 +133,7 @@
   var CACHE_NAME = "tank-arena-ota-v1";
   var VERSION_TIMEOUT_MS = 6000; // don't make offline users wait long
   var MIN_OVERLAY_MS = 650;      // avoid a jarring flash on fast boots
+  var BOOT_ESCAPE_MS = 2500;     // if the game hasn't confirmed by now, force-boot the bundled copy
 
   // ===== DOM helpers ===========================================================
   var overlay = document.getElementById("overlay");
@@ -240,44 +248,100 @@
   }
 
   // ===== Booting the game ======================================================
-  var booted = false;
+  var booted = false;          // a boot was initiated (an iframe was mounted)
+  var bootConfirmed = false;   // the game iframe fired onload
+  var escaped = false;         // the safety fallback already ran
+  var overlayGone = false;
+
+  function hideOverlay() {
+    if (overlayGone) return;
+    overlayGone = true;
+    overlay.classList.add("hidden");
+    setTimeout(function () { if (overlay.parentNode) overlay.parentNode.removeChild(overlay); }, 400);
+  }
   function hideOverlaySoon() {
     var wait = Math.max(0, MIN_OVERLAY_MS - (Date.now() - startedAt));
-    setTimeout(function () {
-      overlay.classList.add("hidden");
-      setTimeout(function () { if (overlay.parentNode) overlay.parentNode.removeChild(overlay); }, 400);
-    }, wait);
+    setTimeout(hideOverlay, wait);
   }
 
-  function mountIframe(src, isBlob) {
-    var iframe = document.createElement("iframe");
-    iframe.id = "gameframe";
-    iframe.setAttribute("allow", "fullscreen");
-    iframe.onload = function () { hideOverlaySoon(); };
-    iframe.src = src;
-    document.body.insertBefore(iframe, overlay);
+  // Mount (or replace) the game iframe. Sandboxed but same-origin so the game's
+  // own touch/canvas APIs work; wrapped so a DOM/CORS restriction can't hang us.
+  function mountIframe(src) {
+    try {
+      var old = document.getElementById("gameframe");
+      if (old && old.parentNode) old.parentNode.removeChild(old);
+      var iframe = document.createElement("iframe");
+      iframe.id = "gameframe";
+      iframe.setAttribute("allow", "fullscreen; autoplay");
+      iframe.setAttribute("sandbox", "allow-scripts allow-same-origin allow-modals allow-pointer-lock");
+      iframe.onload = function () { bootConfirmed = true; hideOverlaySoon(); };
+      iframe.onerror = function () { forceEscape("iframe error"); };
+      iframe.src = src;
+      document.body.insertBefore(iframe, overlay);
+    } catch (e) {
+      forceEscape("mount error: " + (e && e.message));
+    }
+  }
+
+  // Safety fail-safe: if the game hasn't confirmed within BOOT_ESCAPE_MS, or any
+  // boot error fires, bypass the iframe cache/blob path and boot the bundled
+  // local game.html straight from the APK, then reveal it no matter what — the
+  // player is never trapped on the loading screen.
+  function armWatchdog() {
+    setTimeout(function () {
+      if (!bootConfirmed) forceEscape("watchdog timeout (stuck at Starting…)");
+    }, BOOT_ESCAPE_MS);
+  }
+  function forceEscape(reason) {
+    if (bootConfirmed) { hideOverlay(); return; }
+    if (escaped) { hideOverlay(); return; }
+    escaped = true;
+    try { if (window.console) console.warn("OTA boot fail-safe:", reason); } catch (e) {}
+    booted = true;
+    setStatus("Starting bundled version…");
+    mountIframe("game.html?ts=" + Date.now()); // direct same-origin bundled copy
+    // Reveal within a short grace whether or not this iframe's onload fires.
+    setTimeout(hideOverlay, 1000);
   }
 
   function bootHtml(html) {
     if (booted) return;
     booted = true;
-    // Blob URL keeps the cached game a same-origin document (secure context),
-    // so its own Cache/touch/canvas APIs behave exactly as when served directly.
-    var blob = new Blob([html], { type: "text/html" });
-    mountIframe(URL.createObjectURL(blob), true);
+    try {
+      // Blob URL keeps the cached game a same-origin document so its own
+      // Cache/touch/canvas APIs behave exactly as when served directly.
+      var blob = new Blob([html], { type: "text/html" });
+      mountIframe(URL.createObjectURL(blob));
+      armWatchdog();
+    } catch (e) {
+      forceEscape("bootHtml: " + (e && e.message));
+    }
   }
 
   function bootBundled() {
     if (booted) return;
     booted = true;
-    // The fallback copy packaged in the APK, loaded same-origin from the shell.
-    mountIframe("game.html?ts=" + Date.now(), false);
+    mountIframe("game.html?ts=" + Date.now()); // fallback packaged in the APK
+    armWatchdog();
   }
+
+  // Any uncaught error before the game confirms -> escape to the bundled copy.
+  window.addEventListener("error", function (ev) {
+    if (!bootConfirmed) forceEscape("window.onerror: " + (ev && ev.message));
+  });
+  window.addEventListener("unhandledrejection", function () {
+    if (!bootConfirmed && booted) forceEscape("unhandledrejection");
+  });
 
   // ===== Orchestration =========================================================
   function start() {
     setStatus("Checking for updates…");
     setProgress(null);
+    // Global cap: even if the version/download promises hang and boot is never
+    // reached, escape to the bundled game so the loader can't freeze forever.
+    setTimeout(function () {
+      if (!booted && !escaped) forceEscape("global cap: boot never reached");
+    }, VERSION_TIMEOUT_MS + 3000);
 
     var remotePromise = fetchJSON(OTA_BASE + "version.json?t=" + Date.now(), VERSION_TIMEOUT_MS)
       .catch(function () { return null; }); // offline / not-yet-hosted -> null
