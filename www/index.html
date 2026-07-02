@@ -127,6 +127,10 @@
   var REGEN_DELAY = 4;    // seconds without taking damage before regen kicks in
   var REGEN_FRAC = 0.10;  // fraction of maxHp healed per second while regenerating
 
+  // Base shape XP is multiplied by this at grant time (single knob for tuning
+  // farm speed without touching the per-shape numbers below).
+  var XP_MULTIPLIER = 4;
+
   var SHAPE_TYPES = {
     triangle: { sides: 3, hp: 18,  xp: 12, radius: 16, color: "#e05353", rot: 1.6 },
     square:   { sides: 4, hp: 45,  xp: 25, radius: 20, color: "#e0c740", rot: 0.9 },
@@ -136,6 +140,38 @@
   var SHAPE_RESPAWN_INTERVAL = 1.2; // seconds between respawn attempts while under cap
 
   var CAMERA_SMOOTH = 4.5; // higher = snappier follow, lower = laggier/smoother
+
+  // --- Tier 2 class evolution (diep.io style) ---
+  // At EVOLVE_LEVEL the player picks one permanent Tier 2 class, which changes
+  // fireBullet()'s behavior (fireMode) and scales reload/damage/speed/accuracy.
+  var EVOLVE_LEVEL = 15;
+  var CLASSES = {
+    twin: {
+      label: "Twin", color: "#4caf50", desc: "Shoots 2 parallel bullets",
+      fireMode: "twin", offset: 12,
+      reloadMult: 1, damageMult: 1, speedMult: 1, inaccuracy: 0,
+      barrelLen: 1, barrelWidth: 0.85
+    },
+    sniper: {
+      label: "Sniper", color: "#e05353", desc: "Long barrel, faster & stronger shots, slower reload",
+      fireMode: "single",
+      reloadMult: 1.7, damageMult: 1.9, speedMult: 1.6, inaccuracy: 0,
+      barrelLen: 1.7, barrelWidth: 0.7
+    },
+    machinegun: {
+      label: "Machine Gun", color: "#f2c14e", desc: "Wide barrel, faster reload, less accurate",
+      fireMode: "single",
+      reloadMult: 0.5, damageMult: 0.8, speedMult: 1, inaccuracy: 0.22,
+      barrelLen: 0.75, barrelWidth: 1.5
+    },
+    flank: {
+      label: "Flank Guard", color: "#4d8fe0", desc: "Fires from front and back barrels",
+      fireMode: "flank", offset: 0,
+      reloadMult: 1, damageMult: 1, speedMult: 1, inaccuracy: 0,
+      barrelLen: 1, barrelWidth: 1
+    }
+  };
+  var CLASS_ORDER = ["twin", "sniper", "machinegun", "flank"]; // stable order for the choice overlay
 
   // ======================================================================
   // 3. INPUT: DUAL VIRTUAL JOYSTICKS + DESKTOP FALLBACK
@@ -192,11 +228,26 @@
     stick.dx = 0; stick.dy = 0; stick.mag = 0;
   }
 
-  // Returns the upgrade key whose button rect contains (x,y), or null.
-  // getUpgradeButtons() is a hoisted function declaration defined later in the
-  // rendering section, so it's safe to call here.
+  // --- Status button (upgrade menu toggle) + evolution overlay hit-testing ---
+  // All three hit-test helpers below reference getExpandedUpgradeButtons(),
+  // getStatusButtonRect(), and getEvolutionCards(), which are hoisted function
+  // declarations defined later in the rendering section — safe to call here.
+  var statusMenuOpen = false;
+
+  // Per the spec, the menu can only be opened while points are available; if
+  // points run out (or never existed) a tap on Status is a no-op.
+  function toggleStatusMenu() {
+    if (player.skillPoints <= 0) { statusMenuOpen = false; return; }
+    statusMenuOpen = !statusMenuOpen;
+  }
+
+  function hitStatusButton(x, y) {
+    var r = getStatusButtonRect();
+    return x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h;
+  }
+
   function hitUpgradeButton(x, y) {
-    var rects = getUpgradeButtons();
+    var rects = getExpandedUpgradeButtons();
     for (var i = 0; i < rects.length; i++) {
       var r = rects[i];
       if (x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h) {
@@ -206,18 +257,48 @@
     return null;
   }
 
+  function hitEvolutionCard(x, y) {
+    var cards = getEvolutionCards();
+    for (var i = 0; i < cards.length; i++) {
+      var c = cards[i];
+      if (x >= c.x && x <= c.x + c.w && y >= c.y && y <= c.y + c.h) return c.key;
+    }
+    return null;
+  }
+
+  // Shared tap-routing logic used by both touch and mouse input. Returns true
+  // if the tap was consumed by UI (evolution overlay / status button / an
+  // expanded upgrade button) so the caller skips joystick/fire handling.
+  function handleUiTap(x, y) {
+    if (player.evolutionPending) {
+      // The overlay blocks everything underneath it while a choice is
+      // pending, even taps that miss the 4 cards.
+      var classKey = hitEvolutionCard(x, y);
+      if (classKey) chooseClass(classKey);
+      return true;
+    }
+    if (hitStatusButton(x, y)) {
+      toggleStatusMenu();
+      return true;
+    }
+    if (statusMenuOpen && player.skillPoints > 0) {
+      var upKey = hitUpgradeButton(x, y);
+      if (upKey) {
+        applyUpgrade(upKey);
+        return true;
+      }
+    }
+    return false;
+  }
+
   canvas.addEventListener("touchstart", function (e) {
     e.preventDefault();
     var touches = e.changedTouches;
     for (var i = 0; i < touches.length; i++) {
       var t = touches[i];
-      // Upgrade buttons are hit-tested FIRST so a tap on one is consumed and
-      // not misinterpreted as the start of a joystick drag.
-      var upKey = hitUpgradeButton(t.clientX, t.clientY);
-      if (upKey) {
-        applyUpgrade(upKey);
-        continue;
-      }
+      // UI is hit-tested FIRST so a tap on it is consumed and not
+      // misinterpreted as the start of a joystick drag.
+      if (handleUiTap(t.clientX, t.clientY)) continue;
       // Left half of screen = movement stick, right half = aim/fire stick.
       var isLeft = t.clientX < view.w / 2;
       if (isLeft && !moveStick.active) {
@@ -265,9 +346,8 @@
     mouse.x = e.clientX; mouse.y = e.clientY;
   });
   canvas.addEventListener("mousedown", function (e) {
-    // Check upgrade buttons first so clicking one upgrades instead of firing.
-    var upKey = hitUpgradeButton(e.clientX, e.clientY);
-    if (upKey) { applyUpgrade(upKey); return; }
+    // Check UI first so clicking it upgrades/chooses/toggles instead of firing.
+    if (handleUiTap(e.clientX, e.clientY)) return;
     mouse.down = true;
   });
   window.addEventListener("mouseup", function (e) { mouse.down = false; });
@@ -294,6 +374,8 @@
       xpToNext: 100,
       skillPoints: 0,
       stats: { speed: 0, reload: 0, damage: 0, health: 0 }, // tiers spent per stat
+      tankClass: null,        // Tier 2 class key once chosen (see CLASSES), null before EVOLVE_LEVEL
+      evolutionPending: false, // true while the class-choice overlay should be shown
       // Effective stats, seeded to tier-0 base so update code needs no branching.
       // recomputeStats() rewrites these whenever an upgrade is purchased.
       moveAccel: PLAYER_BASE.accel,
@@ -331,6 +413,16 @@
     player.skillPoints--;
     player.stats[key]++;
     recomputeStats(player);
+    // The upgrade menu should only ever be open while points are available
+    // (see toggleStatusMenu) — collapse it the moment the last point is spent.
+    if (player.skillPoints <= 0) statusMenuOpen = false;
+  }
+
+  // Chooses the player's permanent Tier 2 class at the evolution prompt.
+  function chooseClass(key) {
+    if (!player.evolutionPending || !CLASSES[key]) return;
+    player.tankClass = key;
+    player.evolutionPending = false;
   }
 
   function spawnShape() {
@@ -355,19 +447,42 @@
 
   var bullets = []; // pooled-by-reuse array of {x,y,vx,vy,life}
 
-  function fireBullet() {
-    var speed = PLAYER_BASE.bulletSpeed;
-    var tipX = player.x + Math.cos(player.turretAngle) * (player.radius + 10);
-    var tipY = player.y + Math.sin(player.turretAngle) * (player.radius + 10);
+  // Spawns one bullet at the given world angle, offset laterally (perpendicular
+  // to that angle) by lateralOffset — used to place Twin's two parallel barrels.
+  function spawnBullet(angle, lateralOffset, speed, dmg) {
+    var ox = -Math.sin(angle) * lateralOffset;
+    var oy = Math.cos(angle) * lateralOffset;
+    var tipX = player.x + Math.cos(angle) * (player.radius + 10) + ox;
+    var tipY = player.y + Math.sin(angle) * (player.radius + 10) + oy;
     bullets.push({
       x: tipX,
       y: tipY,
-      vx: Math.cos(player.turretAngle) * speed,
-      vy: Math.sin(player.turretAngle) * speed,
+      vx: Math.cos(angle) * speed,
+      vy: Math.sin(angle) * speed,
       life: PLAYER_BASE.bulletLife,
       radius: PLAYER_BASE.bulletRadius,
-      dmg: player.bulletDamageEff   // snapshot damage at fire time (Damage upgrade)
+      dmg: dmg
     });
+  }
+
+  function fireBullet() {
+    var cls = player.tankClass ? CLASSES[player.tankClass] : null;
+    var speed = PLAYER_BASE.bulletSpeed * (cls ? cls.speedMult : 1);
+    var dmg = player.bulletDamageEff * (cls ? cls.damageMult : 1);
+    var fireMode = cls ? cls.fireMode : "single";
+
+    if (fireMode === "twin") {
+      spawnBullet(player.turretAngle, cls.offset, speed, dmg);
+      spawnBullet(player.turretAngle, -cls.offset, speed, dmg);
+    } else if (fireMode === "flank") {
+      spawnBullet(player.turretAngle, 0, speed, dmg);
+      spawnBullet(player.turretAngle + Math.PI, 0, speed, dmg);
+    } else {
+      // Machine Gun's inaccuracy adds a random angle spread; other single-
+      // barrel classes (or no class yet) have inaccuracy 0, so spread is 0.
+      var spread = cls && cls.inaccuracy ? randRange(-cls.inaccuracy, cls.inaccuracy) : 0;
+      spawnBullet(player.turretAngle + spread, 0, speed, dmg);
+    }
   }
 
   // ======================================================================
@@ -431,7 +546,8 @@
     player.fireTimer -= dt;
     if (aiming && player.fireTimer <= 0) {
       fireBullet();
-      player.fireTimer = player.fireCooldownEff;
+      var cls = player.tankClass ? CLASSES[player.tankClass] : null;
+      player.fireTimer = player.fireCooldownEff * (cls ? cls.reloadMult : 1);
     }
 
     if (player.hitTimer > 0) player.hitTimer -= dt;
@@ -479,6 +595,11 @@
       // Each level grants one skill point to spend on the 4 upgradable stats.
       // (No passive stat growth — all power comes from player-chosen upgrades.)
       player.skillPoints++;
+      // First time crossing EVOLVE_LEVEL, prompt the one-time Tier 2 class
+      // choice. Guarded by tankClass so it never re-fires after a pick.
+      if (player.level >= EVOLVE_LEVEL && !player.tankClass && !player.evolutionPending) {
+        player.evolutionPending = true;
+      }
     }
   }
 
@@ -499,7 +620,7 @@
           s.hp -= b.dmg;
           hit = true;
           if (s.hp <= 0) {
-            grantXp(SHAPE_TYPES[s.type].xp);
+            grantXp(SHAPE_TYPES[s.type].xp * XP_MULTIPLIER);
             shapes.splice(si, 1);
           }
           break;
@@ -629,12 +750,25 @@
     // flash while invulnerable after taking a hit
     var flashing = player.hitTimer > 0 && Math.floor(player.hitTimer * 12) % 2 === 0;
 
-    // Barrel
+    // Barrel(s) — shape/count depends on the chosen Tier 2 class, if any.
+    // Drawing happens inside a frame already rotated to turretAngle, so
+    // "forward" is always +x and "backward" (Flank Guard's rear barrel) is -x.
     ctx.save();
     ctx.translate(p.x, p.y);
     ctx.rotate(player.turretAngle);
     ctx.fillStyle = "#8fa3b3";
-    ctx.fillRect(0, -7, player.radius + 18, 14);
+    var cls = player.tankClass ? CLASSES[player.tankClass] : null;
+    var bLen = (player.radius + 18) * (cls ? cls.barrelLen : 1);
+    var bWid = 14 * (cls ? cls.barrelWidth : 1);
+    if (cls && cls.fireMode === "twin") {
+      ctx.fillRect(0, cls.offset - bWid / 2, bLen, bWid);
+      ctx.fillRect(0, -cls.offset - bWid / 2, bLen, bWid);
+    } else if (cls && cls.fireMode === "flank") {
+      ctx.fillRect(0, -bWid / 2, bLen, bWid);
+      ctx.fillRect(-bLen, -bWid / 2, bLen, bWid);
+    } else {
+      ctx.fillRect(0, -bWid / 2, bLen, bWid);
+    }
     ctx.restore();
 
     // Body
@@ -700,30 +834,6 @@
     ctx.fillText(Math.max(0, Math.round(player.hp)) + " / " + player.maxHp, pad, pad + 60);
   }
 
-  // Compute the 4 upgrade-button rectangles fresh each call from the current
-  // view size, so the bar re-centers correctly on resize / orientation change.
-  // Row is centered along the top edge, keeping both bottom corners free for
-  // the floating joysticks.
-  function getUpgradeButtons() {
-    var gap = 8;
-    var bw = Math.min(84, (view.w - 40 - gap * (UPGRADES.length - 1)) / UPGRADES.length);
-    var bh = 44;
-    var totalW = bw * UPGRADES.length + gap * (UPGRADES.length - 1);
-    var startX = (view.w - totalW) / 2;
-    var y = 10;
-    var rects = [];
-    for (var i = 0; i < UPGRADES.length; i++) {
-      rects.push({
-        def: UPGRADES[i],
-        x: startX + i * (bw + gap),
-        y: y,
-        w: bw,
-        h: bh
-      });
-    }
-    return rects;
-  }
-
   function roundRect(x, y, w, h, r) {
     ctx.beginPath();
     ctx.moveTo(x + r, y);
@@ -734,49 +844,157 @@
     ctx.closePath();
   }
 
-  function drawUpgradeButtons() {
-    var rects = getUpgradeButtons();
-    var canSpend = player.skillPoints > 0;
+  // Wraps text within maxWidth, drawing each line centered at cx starting at y.
+  // ctx.font/fillStyle/textAlign must already be set by the caller.
+  function wrapText(text, cx, y, maxWidth, lineHeight) {
+    var words = text.split(" ");
+    var line = "";
+    var ly = y;
+    for (var i = 0; i < words.length; i++) {
+      var test = line + words[i] + " ";
+      if (ctx.measureText(test).width > maxWidth && line !== "") {
+        ctx.fillText(line, cx, ly);
+        line = words[i] + " ";
+        ly += lineHeight;
+      } else {
+        line = test;
+      }
+    }
+    ctx.fillText(line, cx, ly);
+  }
+
+  // The Status button sits directly under the HP bar (HUD ends around
+  // pad+63 — see drawHUD), collapsed by default. Recomputed each call so it
+  // stays correctly placed across resize/orientation changes.
+  function getStatusButtonRect() {
+    var pad = 16;
+    return { x: pad, y: pad + 68, w: Math.min(130, view.w * 0.32), h: 32 };
+  }
+
+  function drawStatusButton() {
+    var r = getStatusButtonRect();
+    var hasPoints = player.skillPoints > 0;
+
+    roundRect(r.x, r.y, r.w, r.h, 8);
+    ctx.fillStyle = hasPoints ? "rgba(255,213,74,0.92)" : "rgba(255,255,255,0.10)";
+    ctx.fill();
+    ctx.lineWidth = hasPoints ? 2 : 1;
+    ctx.strokeStyle = hasPoints ? "#ffffff" : "rgba(255,255,255,0.2)";
+    ctx.stroke();
+
+    ctx.fillStyle = hasPoints ? "#0d0f14" : "rgba(255,255,255,0.6)";
+    ctx.font = "700 13px -apple-system, system-ui, sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText("Status" + (hasPoints ? " (" + player.skillPoints + ")" : ""), r.x + r.w / 2, r.y + r.h / 2 + 4);
+    ctx.textAlign = "left";
+  }
+
+  // The 4 stat-upgrade buttons, laid out as a compact 2x2 grid directly below
+  // the Status button. Only meaningful (drawn/hit-tested) while the menu is
+  // open AND skill points are available — see drawUpgradeMenu / handleUiTap.
+  function getExpandedUpgradeButtons() {
+    var sb = getStatusButtonRect();
+    var gap = 8, bw = 88, bh = 38, cols = 2;
+    var startX = sb.x, startY = sb.y + sb.h + 8;
+    var rects = [];
+    for (var i = 0; i < UPGRADES.length; i++) {
+      var col = i % cols, row = Math.floor(i / cols);
+      rects.push({
+        def: UPGRADES[i],
+        x: startX + col * (bw + gap),
+        y: startY + row * (bh + gap),
+        w: bw,
+        h: bh
+      });
+    }
+    return rects;
+  }
+
+  function drawUpgradeMenu() {
+    if (!statusMenuOpen || player.skillPoints <= 0) return;
+    var rects = getExpandedUpgradeButtons();
 
     for (var i = 0; i < rects.length; i++) {
       var rb = rects[i];
       var tier = player.stats[rb.def.key];
       var maxed = tier >= MAX_TIER;
-      var enabled = canSpend && !maxed;
 
-      // Button body: full color + border glow when affordable, dim when not.
-      roundRect(rb.x, rb.y, rb.w, rb.h, 8);
-      ctx.fillStyle = enabled ? rb.def.color : "rgba(255,255,255,0.10)";
-      ctx.globalAlpha = enabled ? 0.92 : 1;
+      roundRect(rb.x, rb.y, rb.w, rb.h, 6);
+      ctx.fillStyle = maxed ? "rgba(255,255,255,0.10)" : rb.def.color;
+      ctx.globalAlpha = maxed ? 1 : 0.92;
       ctx.fill();
       ctx.globalAlpha = 1;
-      ctx.lineWidth = enabled ? 2 : 1;
-      ctx.strokeStyle = enabled ? "#ffffff" : "rgba(255,255,255,0.2)";
+      ctx.lineWidth = maxed ? 1 : 2;
+      ctx.strokeStyle = maxed ? "rgba(255,255,255,0.2)" : "#ffffff";
       ctx.stroke();
 
-      // Label
-      ctx.fillStyle = enabled ? "#0d0f14" : "rgba(255,255,255,0.55)";
-      ctx.font = "700 13px -apple-system, system-ui, sans-serif";
+      ctx.fillStyle = maxed ? "rgba(255,255,255,0.55)" : "#0d0f14";
+      ctx.font = "700 12px -apple-system, system-ui, sans-serif";
       ctx.textAlign = "center";
-      ctx.fillText(rb.def.label, rb.x + rb.w / 2, rb.y + 18);
-
-      // Tier text
-      ctx.font = "600 11px -apple-system, system-ui, sans-serif";
-      ctx.fillText(maxed ? "MAX" : (tier + "/" + MAX_TIER), rb.x + rb.w / 2, rb.y + 34);
-
-      ctx.textAlign = "left"; // restore default for other draws
-    }
-
-    // Skill-points badge, centered just below the button row, only when the
-    // player has points waiting to be spent (draws attention to the upgrades).
-    if (canSpend) {
-      var badgeY = rects[0].y + rects[0].h + 6;
-      ctx.font = "700 13px -apple-system, system-ui, sans-serif";
-      ctx.textAlign = "center";
-      ctx.fillStyle = "#ffd54a";
-      ctx.fillText("Skill Points: " + player.skillPoints + " — tap to upgrade", view.w / 2, badgeY + 12);
+      ctx.fillText(rb.def.label, rb.x + rb.w / 2, rb.y + 16);
+      ctx.font = "600 10px -apple-system, system-ui, sans-serif";
+      ctx.fillText(maxed ? "MAX" : (tier + "/" + MAX_TIER), rb.x + rb.w / 2, rb.y + 31);
       ctx.textAlign = "left";
     }
+  }
+
+  // 4 large class-choice cards, laid out as a row in landscape or a 2x2 grid
+  // in portrait, centered on screen.
+  function getEvolutionCards() {
+    var margin = 20, gap = 16;
+    var cols = view.w > view.h ? CLASS_ORDER.length : 2;
+    var rows = Math.ceil(CLASS_ORDER.length / cols);
+    var cw = (view.w - margin * 2 - gap * (cols - 1)) / cols;
+    var ch = Math.min(160, (view.h - margin * 2 - gap * (rows - 1)) / rows);
+    var totalW = cw * cols + gap * (cols - 1);
+    var totalH = ch * rows + gap * (rows - 1);
+    var startX = (view.w - totalW) / 2;
+    var startY = (view.h - totalH) / 2;
+    var cards = [];
+    for (var i = 0; i < CLASS_ORDER.length; i++) {
+      var col = i % cols, row = Math.floor(i / cols);
+      var key = CLASS_ORDER[i];
+      cards.push({
+        key: key,
+        def: CLASSES[key],
+        x: startX + col * (cw + gap),
+        y: startY + row * (ch + gap),
+        w: cw,
+        h: ch
+      });
+    }
+    return cards;
+  }
+
+  function drawEvolutionOverlay() {
+    ctx.fillStyle = "rgba(5,6,10,0.88)";
+    ctx.fillRect(0, 0, view.w, view.h);
+
+    var cards = getEvolutionCards();
+
+    ctx.textAlign = "center";
+    ctx.fillStyle = "#fff";
+    ctx.font = "700 20px -apple-system, system-ui, sans-serif";
+    ctx.fillText("Choose Your Class — Level " + EVOLVE_LEVEL, view.w / 2, Math.max(28, cards[0].y - 20));
+
+    for (var i = 0; i < cards.length; i++) {
+      var c = cards[i];
+      roundRect(c.x, c.y, c.w, c.h, 10);
+      ctx.fillStyle = c.def.color;
+      ctx.globalAlpha = 0.92;
+      ctx.fill();
+      ctx.globalAlpha = 1;
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = "#ffffff";
+      ctx.stroke();
+
+      ctx.fillStyle = "#0d0f14";
+      ctx.font = "700 16px -apple-system, system-ui, sans-serif";
+      ctx.fillText(c.def.label, c.x + c.w / 2, c.y + 28);
+      ctx.font = "500 12px -apple-system, system-ui, sans-serif";
+      wrapText(c.def.desc, c.x + c.w / 2, c.y + 50, c.w - 20, 15);
+    }
+    ctx.textAlign = "left";
   }
 
   function render() {
@@ -793,7 +1011,12 @@
     drawStick(moveStick);
     drawStick(aimStick);
     drawHUD();
-    drawUpgradeButtons();
+    drawStatusButton();
+    drawUpgradeMenu();
+
+    // Evolution overlay is drawn last so it sits on top of everything and
+    // fully covers the HUD/menu while a Tier 2 choice is pending.
+    if (player.evolutionPending) drawEvolutionOverlay();
   }
 
   // ======================================================================
