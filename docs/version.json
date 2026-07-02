@@ -1,5 +1,5 @@
 {
-  "version": "1.0.2",
+  "version": "1.1.0",
   "game": "game.html",
-  "notes": "Tank Arena OTA manifest. Bump 'version' whenever game.html changes so clients download and cache the new build."
+  "notes": "Tank Arena OTA manifest. Bump 'version' whenever game.html changes so clients download and cache the new build. 1.1.0 = authentic Diep.io class tree + 8 standard stats."
 }

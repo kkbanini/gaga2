@@ -42,14 +42,20 @@ Until then the APK still runs fine from its bundled fallback.
 - Dual virtual joysticks (move + aim/auto-fire), WASD/mouse fallback on desktop.
 - A large 6000×6000 world densely populated with shapes (triangles/squares/
   pentagons) to farm for XP.
-- A 6-stat skill-point upgrade menu (Speed, Reload, Damage, Health, Body Dmg,
-  Shield) opened via the **Status** button under the health bar.
+- An **8-stat** skill-point menu opened via the **Status** button under the
+  health bar: Health Regen, Max Health, Body Damage, Bullet Speed, Bullet
+  Penetration, Bullet Damage, Reload, Movement Speed (cap 8, raised to 10 for
+  the Smasher line).
 - **Rammer / body-damage mechanics** — colliding with a shape damages both it
-  and you; Body Dmg and Shield tune the exchange.
-- A **deep class evolution tree** — pick a base class at Level 15 (Twin, Sniper,
-  Machine Gun, Flank Guard, Smasher), then a Tier-3 sub-class at Level 30 and a
-  Tier-4 at Level 45 (25 classes total, e.g. Smasher → Auto-Smasher/Spike →
-  Auto-Spike/Mega-Spike).
+  and you; Body Damage tunes the ramming output.
+- An **authentic Diep.io class evolution tree** — pick a base class at Level 15
+  (Twin, Sniper, Machine Gun, Flank Guard, or the Rammer/Basic path), then a
+  Tier-3 sub-class at Level 30 and a Tier-4 at Level 45. Distinct weapon
+  mechanics per branch: cone Machine Gun, 11-barrel Spread Shot, 8-way Octo
+  Tank, Hunter's large+small twin bullets, sniper viewport zoom, Stalker
+  invisibility, Destroyer/Annihilator recoil, Tri-Angle/Booster recoil thrust,
+  Auto Gunner / Hybrid / Auto-Smasher auto-turrets, and the gunless Smasher →
+  Auto-Smasher / Spike ramming line.
 - Health regeneration after a few seconds without taking damage.
 - Smooth camera follow.
 
