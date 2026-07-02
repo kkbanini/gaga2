@@ -1,0 +1,21 @@
+{
+  "name": "tank-arena",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A Diep.io-style top-down tank shooter for Android, built with Apache Cordova.",
+  "scripts": {
+    "android:add": "cordova platform add android",
+    "prepare:android": "cordova prepare android",
+    "build:android": "cordova build android",
+    "build:android:release": "cordova build android --release"
+  },
+  "devDependencies": {
+    "cordova": "^13.0.0",
+    "cordova-android": "^15.0.0"
+  },
+  "cordova": {
+    "platforms": [
+      "android"
+    ]
+  }
+}
