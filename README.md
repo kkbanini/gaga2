@@ -58,6 +58,16 @@ Until then the APK still runs fine from its bundled fallback.
   Auto-Smasher / Spike ramming line.
 - Health regeneration after a few seconds without taking damage.
 - Smooth camera follow.
+- A **main-menu lobby** (Diep.io style): FFA or 2 Teams, region + username entry,
+  and a team-balance lock. In 2 Teams mode the tank/bullet/nameplate take the
+  team colour, bots are split evenly, and same-team friendly fire is disabled.
+- **AI bots** populate the arena, and a **top-right minimap** (safe-area aware)
+  shows the player, bots (team-coloured), and a pulsing skull at the boss.
+- A **Mythical Boss** spawns at the map center every 10 minutes (with a 10-second
+  blinking warning). One of four bosses appears — Polygon King, Summoner Core,
+  Giga Smasher, Omega Dreadnought — each with a giant health bar. Landing the
+  kill instantly grants the player **+10 levels** (capped at level 45) and posts
+  a global "[name] has defeated the [boss]!" notification.
 
 ## Try it instantly (no build required)
 

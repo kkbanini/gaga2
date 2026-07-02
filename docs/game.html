@@ -73,12 +73,94 @@
   @media (max-width: 600px) and (orientation: portrait) {
     #rotateHint { display: flex; }
   }
+
+  /* ---- Main-menu lobby (Diep.io style) ---- */
+  #lobby {
+    position: fixed; inset: 0; z-index: 40;
+    display: flex; align-items: center; justify-content: center;
+    padding: calc(16px + env(safe-area-inset-top)) 16px calc(16px + env(safe-area-inset-bottom));
+    background: rgba(12,16,24,0.45);
+    -webkit-backdrop-filter: blur(3px); backdrop-filter: blur(3px);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  }
+  #lobby.hidden { display: none; }
+  .lobbyCard {
+    width: min(420px, 92vw);
+    background: rgba(20,26,38,0.92);
+    border: 3px solid rgba(255,255,255,0.14);
+    border-radius: 16px;
+    padding: 20px 20px 22px;
+    box-shadow: 0 18px 60px rgba(0,0,0,0.5);
+    text-align: center;
+  }
+  .lobbyTitle {
+    font-size: clamp(28px, 7vw, 44px); font-weight: 800; margin: 2px 0 16px;
+    background: linear-gradient(90deg,#3fb6f0,#b06fd6);
+    -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
+  }
+  .lobbyRow { display: flex; gap: 10px; margin-bottom: 12px; }
+  .lobbyRow > * { flex: 1; }
+  #lobby select, #lobby input {
+    width: 100%; box-sizing: border-box;
+    font-size: 16px; padding: 12px 12px; border-radius: 10px;
+    border: 2px solid rgba(255,255,255,0.16);
+    background: #2a3446; color: #eef2f6; outline: none;
+    -webkit-appearance: none; appearance: none;
+  }
+  #nameInput {
+    background: #ffffff; color: #12141a; font-weight: 700; text-align: center;
+    font-size: 20px; padding: 14px; margin-bottom: 14px; border-color: #cfd6de;
+  }
+  #teamRow { gap: 10px; }
+  .teamBtn {
+    font-size: 15px; font-weight: 700; padding: 12px; border-radius: 10px;
+    border: 2px solid transparent; color: #fff; cursor: pointer;
+  }
+  .teamBtn.red { background: #c34a44; }
+  .teamBtn.blue { background: #3f78c4; }
+  .teamBtn.selected { border-color: #ffffff; box-shadow: 0 0 0 2px rgba(255,255,255,0.35) inset; }
+  .teamBtn.locked { opacity: 0.4; cursor: not-allowed; }
+  #teamWarn { color: #ffcf5a; font-size: 12px; font-weight: 700; min-height: 15px; margin: -4px 0 10px; }
+  #playBtn {
+    width: 100%; font-size: 22px; font-weight: 800; letter-spacing: 0.5px;
+    padding: 15px; border: 0; border-radius: 12px; cursor: pointer;
+    color: #fff; background: linear-gradient(180deg,#4aa6f0,#2f7fd6);
+    box-shadow: 0 6px 0 #235e9e; transition: transform 0.05s ease;
+  }
+  #playBtn:active { transform: translateY(3px); box-shadow: 0 3px 0 #235e9e; }
 </style>
 </head>
 <body>
 <canvas id="game"></canvas>
 <div id="safeprobe"></div>
 <div id="rotateHint">Rotate your device to landscape<br>for the best experience</div>
+
+<!-- Main-menu lobby overlay (hidden once the player presses Play). The live
+     game (grid + wandering shapes/bots) renders behind the blurred backdrop. -->
+<div id="lobby">
+  <div class="lobbyCard">
+    <div class="lobbyTitle">TANK ARENA</div>
+    <div class="lobbyRow">
+      <select id="modeSel" aria-label="Game mode">
+        <option value="ffa">FFA</option>
+        <option value="teams">2 Teams</option>
+      </select>
+      <select id="regionSel" aria-label="Region">
+        <option>Singapore (120)</option>
+        <option>Tokyo (98)</option>
+        <option>Frankfurt (140)</option>
+        <option>New York (176)</option>
+      </select>
+    </div>
+    <div id="teamRow" class="lobbyRow" style="display:none;">
+      <button type="button" class="teamBtn red" data-team="red">Red Team</button>
+      <button type="button" class="teamBtn blue" data-team="blue">Blue Team</button>
+    </div>
+    <div id="teamWarn"></div>
+    <input id="nameInput" type="text" placeholder="mango" maxlength="16" autocomplete="off" spellcheck="false">
+    <button id="playBtn" type="button">Play!</button>
+  </div>
+</div>
 
 <script>
 (function () {
@@ -149,6 +231,51 @@
   // Bigger world for more room to roam (was 3000x3000).
   var WORLD = { w: 6000, h: 6000 };
   var GRID_SIZE = 100;
+
+  // ---- Game state / lobby / teams ----
+  var MAX_LEVEL = 45;                 // diep.io hard level cap
+  var gameState = "lobby";            // "lobby" while the menu is up, "playing" after Play!
+  var gameMode = "ffa";               // "ffa" | "teams"
+  var playerTeam = "ffa";             // "ffa" | "red" | "blue"
+  var playerName = "mango";
+  var TEAM = {
+    red:  { body: "#e05353", stroke: "#a8443b", bullet: "#f08a84", name: "#ff9a92" },
+    blue: { body: "#4d8fe0", stroke: "#2a6bb0", bullet: "#8fbdf0", name: "#9cc4ff" },
+    ffa:  { body: "#3fb6f0", stroke: "#2a86ad", bullet: "#f2f2f2", name: "#ffffff" }
+  };
+  var NUM_BOTS = 10;                  // AI tanks that populate the arena / fill teams
+  var BOT_NAMES = ["Rex","Nova","Zed","Kilo","Mango","Bolt","Echo","Vex","Juno","Pixel",
+                   "Onyx","Sable","Fizz","Gizmo","Halo","Iris"];
+
+  // ---- Mythical Boss System ----
+  var BOSS_INTERVAL = 600;            // seconds between boss spawns (exactly 10 minutes)
+  var BOSS_WARNING = 10;              // seconds of on-screen warning before the spawn
+  var BOSS_LEVEL_REWARD = 10;         // levels granted for the kill (capped at MAX_LEVEL)
+  var BOSS_MAX_DRONES = 30;           // Summoner Core drone cap
+  var BOSS_NEAR_DIST = 1400;          // show the giant boss health bar within this range
+  var BOSS_TYPES = {
+    polygon_king: {
+      name: "Polygon King", color: "#8e5bd0", stroke: "#5f3a94", sides: 5,
+      radius: 120, hp: 9000, contact: 40, reload: 0.55,
+      bulletDmg: 34, bulletSpeed: 380, bulletR: 13, barrels: 5, radial: true
+    },
+    summoner_core: {
+      name: "Summoner Core", color: "#e0c740", stroke: "#a8912a", sides: 4,
+      radius: 115, hp: 8000, contact: 34, summon: true
+    },
+    giga_smasher: {
+      name: "Giga Smasher", color: "#9aa6ad", stroke: "#5c6672", sides: 0,
+      radius: 130, hp: 11000, contact: 60, rammer: true, spikes: 10,
+      baseSpeed: 90, rageSpeed: 320, knockbackResist: 0.9
+    },
+    omega_dreadnought: {
+      name: "Omega Dreadnought", color: "#4caf6a", stroke: "#2f7a46", sides: 3,
+      radius: 125, hp: 10000, contact: 44, reload: 3.2,
+      bulletDmg: 100000, bulletSpeed: 300, bulletR: 34, rearTurrets: true,
+      turretReload: 0.6, turretDmg: 20, turretBulletR: 8, turretSpeed: 360
+    }
+  };
+  var BOSS_ORDER = ["polygon_king", "summoner_core", "giga_smasher", "omega_dreadnought"];
 
   var PLAYER_BASE = {
     radius: 22,
@@ -618,6 +745,10 @@
 
   function makePlayer() {
     return {
+      id: "you",
+      team: playerTeam,
+      name: playerName,
+      bulletColor: (TEAM[playerTeam] || TEAM.ffa).bullet,
       x: WORLD.w / 2,
       y: WORLD.h / 2,
       vx: 0, vy: 0,
@@ -755,13 +886,15 @@
 
   var bullets = []; // pooled-by-reuse array of {x,y,vx,vy,life}
 
-  // Spawns one bullet at the given world angle, offset laterally (perpendicular
-  // to that angle) by lateralOffset. radius/life/pierce default to the base.
-  function spawnBullet(angle, lateralOffset, speed, dmg, radius, life, pierce) {
+  // Spawns one bullet from a source tank `src` (player or bot) at the given
+  // world angle, offset laterally by lateralOffset. Carries the shooter's team
+  // + id + color so collision code can apply friendly-fire rules. radius / life
+  // / pierce default to the base bullet.
+  function spawnBulletFrom(src, angle, lateralOffset, speed, dmg, radius, life, pierce) {
     var ox = -Math.sin(angle) * lateralOffset;
     var oy = Math.cos(angle) * lateralOffset;
-    var tipX = player.x + Math.cos(angle) * (player.radius + 10) + ox;
-    var tipY = player.y + Math.sin(angle) * (player.radius + 10) + oy;
+    var tipX = src.x + Math.cos(angle) * (src.radius + 10) + ox;
+    var tipY = src.y + Math.sin(angle) * (src.radius + 10) + oy;
     bullets.push({
       x: tipX,
       y: tipY,
@@ -771,8 +904,15 @@
       radius: radius || PLAYER_BASE.bulletRadius,
       dmg: dmg,
       pierce: pierce || 1, // shapes it can still pass through
-      hit: []              // shapes already damaged by this bullet (no double-hit)
+      hit: [],             // things already damaged by this bullet (no double-hit)
+      team: src.team || "ffa",
+      ownerId: src.id,
+      color: src.bulletColor || "#f2f2f2"
     });
+  }
+  // Backward-compatible wrapper: the local player fires through this.
+  function spawnBullet(angle, lateralOffset, speed, dmg, radius, life, pierce) {
+    spawnBulletFrom(player, angle, lateralOffset, speed, dmg, radius, life, pierce);
   }
 
   // Fires the main gun: one bullet per barrel in the current class's `barrels`
@@ -1058,24 +1198,315 @@
     }
   }
 
+  // Advance exactly one level (unless already at MAX_LEVEL): grant a skill point
+  // and open the evolution prompt if a new class tier just unlocked.
+  function levelUp() {
+    if (player.level >= MAX_LEVEL) return;
+    player.level++;
+    player.xpToNext = Math.round(player.xpToNext * 1.35);
+    player.skillPoints++;
+    var targetTier = 0;
+    for (var ei = 0; ei < EVOLVE_LEVELS.length; ei++) {
+      if (player.level >= EVOLVE_LEVELS[ei]) targetTier = ei + 1;
+    }
+    if (targetTier > player.classTier && !player.evolutionPending && evolutionOptions().length > 0) {
+      player.evolutionPending = true;
+    }
+  }
+
   function grantXp(amount) {
+    if (player.level >= MAX_LEVEL) { player.xp = 0; return; }
     player.xp += amount;
-    while (player.xp >= player.xpToNext) {
+    while (player.xp >= player.xpToNext && player.level < MAX_LEVEL) {
       player.xp -= player.xpToNext;
-      player.level++;
-      player.xpToNext = Math.round(player.xpToNext * 1.35);
-      // Each level grants one skill point to spend on the 8 upgradable stats.
-      // (No passive stat growth — all power comes from player-chosen upgrades.)
-      player.skillPoints++;
-      // Evolution: figure out the highest class tier the current level unlocks
-      // (L15->1, L30->2, L45->3). If the player is behind that tier and their
-      // current class actually has options to evolve into, open the prompt.
-      var targetTier = 0;
-      for (var ei = 0; ei < EVOLVE_LEVELS.length; ei++) {
-        if (player.level >= EVOLVE_LEVELS[ei]) targetTier = ei + 1;
+      levelUp();
+    }
+    if (player.level >= MAX_LEVEL) player.xp = 0;
+  }
+
+  // Boss reward: jump the player up exactly n levels instantly (capped at
+  // MAX_LEVEL), bypassing the XP system entirely.
+  function grantLevels(n) {
+    for (var i = 0; i < n && player.level < MAX_LEVEL; i++) levelUp();
+  }
+
+  // ======================================================================
+  // 6b. BOTS + MYTHICAL BOSS SYSTEM
+  // ======================================================================
+  var bots = [];
+  var drones = [];                  // Summoner Core homing triangle drones
+  var boss = null;                  // active boss entity, or null
+  var bossTimer = BOSS_INTERVAL;    // countdown to the next spawn
+  var bossWarningActive = false;    // blinking warning during the last BOSS_WARNING s
+  var notif = { text: "", timer: 0 }; // global kill/announcement toast
+  var DRONE_CONTACT = 12;           // drone ram damage per tick
+
+  function circleHit(a, b) {
+    var dx = a.x - b.x, dy = a.y - b.y, r = a.radius + b.radius;
+    return dx * dx + dy * dy < r * r;
+  }
+  function nearestTank(x, y, maxDist, team) {
+    var best = null, bd = (maxDist || 1e9) * (maxDist || 1e9);
+    var list = allTanks();
+    for (var i = 0; i < list.length; i++) {
+      var t = list[i];
+      if (team && t.team === team) continue; // skip same-team when asked
+      var dx = t.x - x, dy = t.y - y, d = dx * dx + dy * dy;
+      if (d < bd) { bd = d; best = t; }
+    }
+    return best;
+  }
+  function allTanks() {
+    var out = [player];
+    for (var i = 0; i < bots.length; i++) if (bots[i].alive) out.push(bots[i]);
+    return out;
+  }
+  function findBot(id) { for (var i = 0; i < bots.length; i++) if (bots[i].id === id) return bots[i]; return null; }
+
+  // Damage rule: a bullet hurts a tank if it's not the owner and either it's a
+  // boss bullet, or FFA, or the tank is on a different team (friendly fire off).
+  function bulletHitsTank(b, t) {
+    if (b.ownerId === t.id) return false;
+    if (b.team === "boss") return true;
+    if (gameMode !== "teams") return true;
+    return b.team !== t.team;
+  }
+  function tankBodyDamage(t) { return t === player ? player.bodyDamageEff : t.bodyDamage; }
+
+  function damageTank(t, dmg) {
+    t.hp -= dmg;
+    t.regenTimer = 0;
+    if (t.hp <= 0) {
+      if (t === player) { respawnPlayer(); }
+      else { t.alive = false; t.respawnTimer = 3 + Math.random() * 3; }
+    }
+  }
+
+  // ---- Bots ----
+  function makeBot(team) {
+    var col = TEAM[team] || TEAM.ffa;
+    return {
+      id: "bot" + (botIdSeq++),
+      team: team, name: BOT_NAMES[Math.floor(Math.random() * BOT_NAMES.length)],
+      bulletColor: col.bullet,
+      x: randRange(200, WORLD.w - 200), y: randRange(200, WORLD.h - 200),
+      vx: 0, vy: 0, angle: 0, radius: PLAYER_BASE.radius,
+      hp: 120, maxHp: 120, alive: true, respawnTimer: 0,
+      fireTimer: randRange(0, 1), hitTimer: 0, regenTimer: 0,
+      wanderTimer: 0, targetX: WORLD.w / 2, targetY: WORLD.h / 2,
+      bodyDamage: 16
+    };
+  }
+  var botIdSeq = 0;
+  function initBots() {
+    bots = [];
+    for (var i = 0; i < NUM_BOTS; i++) {
+      var team = gameMode === "teams" ? (i % 2 === 0 ? "red" : "blue") : "ffa";
+      bots.push(makeBot(team));
+    }
+  }
+  function updateBots(dt) {
+    for (var i = 0; i < bots.length; i++) {
+      var bt = bots[i];
+      if (!bt.alive) {
+        bt.respawnTimer -= dt;
+        if (bt.respawnTimer <= 0) {
+          var nb = makeBot(bt.team); nb.id = bt.id; bots[i] = nb;
+        }
+        continue;
       }
-      if (targetTier > player.classTier && !player.evolutionPending && evolutionOptions().length > 0) {
-        player.evolutionPending = true;
+      if (bt.hitTimer > 0) bt.hitTimer -= dt;
+      // Wander toward a waypoint; repick periodically.
+      bt.wanderTimer -= dt;
+      if (bt.wanderTimer <= 0) {
+        bt.wanderTimer = randRange(2, 5);
+        bt.targetX = randRange(200, WORLD.w - 200);
+        bt.targetY = randRange(200, WORLD.h - 200);
+      }
+      var mx = bt.targetX - bt.x, my = bt.targetY - bt.y;
+      var ml = Math.sqrt(mx * mx + my * my) || 1;
+      bt.vx += (mx / ml) * 500 * dt; bt.vy += (my / ml) * 500 * dt;
+      var drag = Math.exp(-6 * dt); bt.vx *= drag; bt.vy *= drag;
+      var sp = Math.sqrt(bt.vx * bt.vx + bt.vy * bt.vy), mxs = 190;
+      if (sp > mxs) { bt.vx *= mxs / sp; bt.vy *= mxs / sp; }
+      bt.x = clamp(bt.x + bt.vx * dt, bt.radius, WORLD.w - bt.radius);
+      bt.y = clamp(bt.y + bt.vy * dt, bt.radius, WORLD.h - bt.radius);
+      // Aim at the boss if near, else nearest enemy tank, else nearest shape.
+      var tgt = null;
+      if (boss && Math.hypot(boss.x - bt.x, boss.y - bt.y) < 900) tgt = boss;
+      if (!tgt) tgt = nearestTank(bt.x, bt.y, 700, gameMode === "teams" ? bt.team : null);
+      if (!tgt) tgt = nearestShape(bt.x, bt.y, 500);
+      bt.fireTimer -= dt;
+      if (tgt) {
+        bt.angle = Math.atan2(tgt.y - bt.y, tgt.x - bt.x);
+        if (bt.fireTimer <= 0) {
+          bt.fireTimer = 0.5;
+          spawnBulletFrom(bt, bt.angle, 0, 560, 10, PLAYER_BASE.bulletRadius, PLAYER_BASE.bulletLife, 1);
+        }
+      }
+      // Slow regen.
+      bt.regenTimer += dt;
+      if (bt.regenTimer > REGEN_DELAY && bt.hp < bt.maxHp) bt.hp = Math.min(bt.maxHp, bt.hp + bt.maxHp * 0.06 * dt);
+    }
+  }
+
+  // ---- Boss ----
+  function spawnBoss() {
+    var key = BOSS_ORDER[Math.floor(Math.random() * BOSS_ORDER.length)];
+    var def = BOSS_TYPES[key];
+    boss = {
+      key: key, def: def, name: def.name,
+      x: WORLD.w / 2, y: WORLD.h / 2, vx: 0, vy: 0,
+      radius: def.radius, hp: def.hp, maxHp: def.hp,
+      angle: 0, spin: 0, fireTimer: 1, turretTimer: 0, summonTimer: 0, team: "boss", id: "boss"
+    };
+    drones = [];
+    notif = { text: "A " + def.name + " has appeared at the center!", timer: 4 };
+  }
+  function killBoss(ownerId) {
+    if (!boss) return;
+    var killer = ownerId === "you" ? player.name : (findBot(ownerId) ? findBot(ownerId).name : "A tank");
+    notif = { text: killer + " has defeated the " + boss.name + "!", timer: 6 };
+    if (ownerId === "you") grantLevels(BOSS_LEVEL_REWARD); // instant +10 levels (capped)
+    boss = null; drones = [];
+    bossTimer = BOSS_INTERVAL; bossWarningActive = false;
+  }
+  function updateBoss(dt) {
+    if (!boss) {
+      bossTimer -= dt;
+      bossWarningActive = bossTimer <= BOSS_WARNING;
+      if (bossTimer <= 0) spawnBoss();
+      return;
+    }
+    var d = boss.def;
+    boss.spin += dt * 0.5;
+    boss.fireTimer -= dt;
+    var target = nearestTank(boss.x, boss.y, 4000, null); // boss is hostile to all
+
+    if (d.radial) {
+      // Polygon King: spin + fire 5 bullets radially outward.
+      boss.angle += dt * 0.6;
+      if (boss.fireTimer <= 0) {
+        boss.fireTimer = d.reload;
+        for (var k = 0; k < d.barrels; k++) {
+          var a = boss.angle + (k / d.barrels) * Math.PI * 2;
+          spawnBulletFrom(boss, a, 0, d.bulletSpeed, d.bulletDmg, d.bulletR, 2.2, 3);
+        }
+      }
+    } else if (d.summon) {
+      // Summoner Core: spawn homing drones up to the cap.
+      boss.summonTimer -= dt;
+      if (boss.summonTimer <= 0 && drones.length < BOSS_MAX_DRONES) {
+        boss.summonTimer = 0.6;
+        var ang = Math.random() * Math.PI * 2;
+        drones.push({
+          x: boss.x + Math.cos(ang) * boss.radius, y: boss.y + Math.sin(ang) * boss.radius,
+          vx: 0, vy: 0, angle: ang, radius: 15, hp: 30, maxHp: 30
+        });
+      }
+    } else if (d.rammer) {
+      // Giga Smasher: charge the nearest tank, faster as HP drops.
+      if (target) {
+        var frac = 1 - boss.hp / boss.maxHp;
+        var spd = d.baseSpeed + (d.rageSpeed - d.baseSpeed) * frac;
+        var ang2 = Math.atan2(target.y - boss.y, target.x - boss.x);
+        boss.x += Math.cos(ang2) * spd * dt;
+        boss.y += Math.sin(ang2) * spd * dt;
+      }
+    } else if (d.rearTurrets) {
+      // Omega Dreadnought: aim main barrel + fire giant one-shot bullets;
+      // rear turrets fire smaller defensive shots.
+      if (target) boss.angle = Math.atan2(target.y - boss.y, target.x - boss.x);
+      if (boss.fireTimer <= 0) {
+        boss.fireTimer = d.reload;
+        spawnBulletFrom(boss, boss.angle, 0, d.bulletSpeed, d.bulletDmg, d.bulletR, 3.5, 5);
+      }
+      boss.turretTimer -= dt;
+      if (boss.turretTimer <= 0) {
+        boss.turretTimer = d.turretReload;
+        var rear = boss.angle + Math.PI;
+        spawnBulletFrom(boss, rear + 0.35, 0, d.turretSpeed, d.turretDmg, d.turretBulletR, 2, 2);
+        spawnBulletFrom(boss, rear - 0.35, 0, d.turretSpeed, d.turretDmg, d.turretBulletR, 2, 2);
+      }
+    }
+    boss.x = clamp(boss.x, boss.radius, WORLD.w - boss.radius);
+    boss.y = clamp(boss.y, boss.radius, WORLD.h - boss.radius);
+  }
+
+  function updateDrones(dt) {
+    for (var i = drones.length - 1; i >= 0; i--) {
+      var dr = drones[i];
+      var t = nearestTank(dr.x, dr.y, 1600, null);
+      if (t) {
+        dr.angle = Math.atan2(t.y - dr.y, t.x - dr.x);
+        dr.vx += Math.cos(dr.angle) * 700 * dt;
+        dr.vy += Math.sin(dr.angle) * 700 * dt;
+      }
+      var drag = Math.exp(-3 * dt); dr.vx *= drag; dr.vy *= drag;
+      var sp = Math.sqrt(dr.vx * dr.vx + dr.vy * dr.vy), mxs = 260;
+      if (sp > mxs) { dr.vx *= mxs / sp; dr.vy *= mxs / sp; }
+      dr.x += dr.vx * dt; dr.y += dr.vy * dt;
+    }
+  }
+
+  // Boss/drone/tank collisions that live outside the shape-focused
+  // checkCollisions(): bullets vs boss/drones/enemy tanks, and body contact.
+  function checkCombat(dt) {
+    // --- bullets vs boss, drones, and enemy tanks ---
+    for (var bi = bullets.length - 1; bi >= 0; bi--) {
+      var b = bullets[bi];
+      if (b.pierce <= 0) continue;
+      // vs boss
+      if (boss && b.team !== "boss" && b.hit.indexOf(boss) < 0 && circleHit(b, boss)) {
+        boss.hp -= b.dmg; b.hit.push(boss); b.pierce -= 1;
+        if (boss.hp <= 0) { killBoss(b.ownerId); if (b.pierce <= 0) { bullets.splice(bi, 1); continue; } }
+        if (b.pierce <= 0) { bullets.splice(bi, 1); continue; }
+      }
+      // vs drones
+      if (b.team !== "boss") {
+        for (var di = drones.length - 1; di >= 0; di--) {
+          var dr = drones[di];
+          if (b.hit.indexOf(dr) >= 0) continue;
+          if (circleHit(b, dr)) { dr.hp -= b.dmg; b.hit.push(dr); b.pierce -= 1; if (dr.hp <= 0) drones.splice(di, 1); break; }
+        }
+        if (b.pierce <= 0) { bullets.splice(bi, 1); continue; }
+      }
+      // vs tanks (player + bots)
+      var tanks = allTanks();
+      for (var ti = 0; ti < tanks.length; ti++) {
+        var t = tanks[ti];
+        if (b.hit.indexOf(t) >= 0 || !bulletHitsTank(b, t)) continue;
+        if (circleHit(b, t)) { damageTank(t, b.dmg); b.hit.push(t); b.pierce -= 1; break; }
+      }
+      if (b.pierce <= 0) bullets.splice(bi, 1);
+    }
+
+    // --- body contact: tanks vs boss + drones (rate-limited by tank.hitTimer) ---
+    var tanks2 = allTanks();
+    for (var i = 0; i < tanks2.length; i++) {
+      var tk = tanks2[i];
+      // vs boss
+      if (boss && circleHit(tk, boss)) {
+        var dx = tk.x - boss.x, dy = tk.y - boss.y, dist = Math.sqrt(dx * dx + dy * dy) || 1;
+        var nx = dx / dist, ny = dy / dist, overlap = tk.radius + boss.radius - dist;
+        // Boss barely moves (heavy + knockback resist); the tank is pushed out.
+        var kr = boss.def.knockbackResist || 0.6;
+        tk.x += nx * overlap * (1 - (1 - kr) * 0.5);
+        tk.y += ny * overlap * (1 - (1 - kr) * 0.5);
+        if (tk.hitTimer <= 0) {
+          damageTank(tk, boss.def.contact);
+          tk.hitTimer = PLAYER_BASE.hitCooldown;
+          if (boss) { boss.hp -= tankBodyDamage(tk); if (boss.hp <= 0) killBoss(tk.id); }
+        }
+      }
+      // vs drones
+      for (var di2 = drones.length - 1; di2 >= 0; di2--) {
+        var d2 = drones[di2];
+        if (circleHit(tk, d2)) {
+          if (tk.hitTimer <= 0) { damageTank(tk, DRONE_CONTACT); tk.hitTimer = PLAYER_BASE.hitCooldown; }
+          d2.hp -= tankBodyDamage(tk);
+          if (d2.hp <= 0) drones.splice(di2, 1);
+        }
       }
     }
   }
@@ -1085,9 +1516,11 @@
   // optimization; O(n*m) is cheap enough per frame. ---
   function checkCollisions() {
     // Bullets vs shapes. Penetration (b.pierce) lets one bullet pass through
-    // several shapes; b.hit prevents damaging the same shape twice.
+    // several shapes; b.hit prevents damaging the same shape twice. Boss bullets
+    // don't interact with shapes.
     for (var bi = bullets.length - 1; bi >= 0; bi--) {
       var b = bullets[bi];
+      if (b.team === "boss") continue;
       for (var si = 0; si < shapes.length; si++) {
         var s = shapes[si];
         if (b.hit.indexOf(s) >= 0) continue; // already hit this shape
@@ -1236,14 +1669,98 @@
   }
 
   function drawBullets() {
-    ctx.fillStyle = "#f2f2f2";
     for (var i = 0; i < bullets.length; i++) {
       var b = bullets[i];
       var p = worldToScreen(b.x, b.y);
+      if (p.x < -40 || p.x > view.w + 40 || p.y < -40 || p.y > view.h + 40) continue;
       ctx.beginPath();
       ctx.arc(p.x, p.y, ZS(b.radius), 0, Math.PI * 2);
+      ctx.fillStyle = b.team === "boss" ? "#ff5a5a" : (b.color || "#f2f2f2");
       ctx.fill();
     }
+  }
+
+  // ---- Boss / bot / drone / minimap rendering ----
+  function drawBots() {
+    for (var i = 0; i < bots.length; i++) {
+      var bt = bots[i];
+      if (!bt.alive) continue;
+      var p = worldToScreen(bt.x, bt.y);
+      if (p.x < -60 || p.x > view.w + 60 || p.y < -60 || p.y > view.h + 60) continue;
+      var col = TEAM[bt.team] || TEAM.ffa;
+      var R = ZS(bt.radius);
+      // barrel
+      ctx.save();
+      ctx.translate(p.x, p.y); ctx.rotate(bt.angle);
+      ctx.fillStyle = "#8fa3b3";
+      ctx.fillRect(0, -ZS(6), R + ZS(16), ZS(12));
+      ctx.restore();
+      // body
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, R, 0, Math.PI * 2);
+      ctx.fillStyle = col.body; ctx.fill();
+      ctx.lineWidth = 3; ctx.strokeStyle = col.stroke; ctx.stroke();
+      // nameplate
+      ctx.fillStyle = col.name;
+      ctx.font = "600 12px -apple-system, system-ui, sans-serif";
+      ctx.textAlign = "center";
+      ctx.fillText(bt.name, p.x, p.y - R - 12);
+      ctx.textAlign = "left";
+      // hp bar (only if damaged)
+      if (bt.hp < bt.maxHp) {
+        var bw = R * 2.2, ratio = Math.max(bt.hp / bt.maxHp, 0);
+        ctx.fillStyle = "rgba(0,0,0,0.4)"; ctx.fillRect(p.x - bw / 2, p.y - R - 8, bw, 5);
+        ctx.fillStyle = "#4caf50"; ctx.fillRect(p.x - bw / 2, p.y - R - 8, bw * ratio, 5);
+      }
+    }
+  }
+
+  function drawDrones() {
+    for (var i = 0; i < drones.length; i++) {
+      var dr = drones[i];
+      var p = worldToScreen(dr.x, dr.y);
+      if (p.x < -40 || p.x > view.w + 40 || p.y < -40 || p.y > view.h + 40) continue;
+      drawPolygon(p.x, p.y, ZS(dr.radius), 3, dr.angle, "#e0c740");
+    }
+  }
+
+  function drawBoss() {
+    if (!boss) return;
+    var p = worldToScreen(boss.x, boss.y);
+    var d = boss.def, R = ZS(boss.radius);
+    // radial / turret barrels
+    if (d.radial) {
+      ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(boss.angle);
+      ctx.fillStyle = "#7d7f88";
+      for (var k = 0; k < d.barrels; k++) {
+        ctx.save(); ctx.rotate((k / d.barrels) * Math.PI * 2);
+        ctx.fillRect(0, -ZS(9), R + ZS(26), ZS(18)); ctx.restore();
+      }
+      ctx.restore();
+    } else if (d.rearTurrets) {
+      ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(boss.angle);
+      ctx.fillStyle = "#5f6d5f";
+      ctx.fillRect(0, -ZS(20), R + ZS(46), ZS(40)); // colossal main barrel
+      ctx.restore();
+    }
+    // rammer spike ring
+    if (d.rammer) {
+      ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(boss.spin);
+      ctx.beginPath();
+      var spikes = d.spikes || 10, rO = R + ZS(16);
+      for (var s = 0; s < spikes; s++) {
+        var a = (s / spikes) * Math.PI * 2, sx = Math.cos(a) * rO, sy = Math.sin(a) * rO;
+        if (s === 0) ctx.moveTo(sx, sy); else ctx.lineTo(sx, sy);
+      }
+      ctx.closePath(); ctx.fillStyle = "#5c6672"; ctx.fill(); ctx.restore();
+    }
+    // body
+    if (d.sides && d.sides > 0) drawPolygon(p.x, p.y, R, d.sides, boss.spin, d.color);
+    else { ctx.beginPath(); ctx.arc(p.x, p.y, R, 0, Math.PI * 2); ctx.fillStyle = d.color; ctx.fill(); }
+    ctx.lineWidth = 4; ctx.strokeStyle = d.stroke; ctx.stroke();
+    // boss name label
+    ctx.fillStyle = "#fff"; ctx.font = "800 15px -apple-system, system-ui, sans-serif";
+    ctx.textAlign = "center"; ctx.fillText(boss.name, p.x, p.y - R - 14); ctx.textAlign = "left";
   }
 
   function drawPlayer() {
@@ -1329,13 +1846,16 @@
       }
     }
 
-    // Body — rammer classes get their class color to read as a distinct build.
+    // Body — in Teams mode the body/stroke take the team color; in FFA the
+    // class-based colors apply (cyan, or rammer purple).
+    var teamCol = TEAM[player.team] || TEAM.ffa;
+    var useTeam = gameMode === "teams";
     ctx.beginPath();
     ctx.arc(p.x, p.y, R, 0, Math.PI * 2);
-    ctx.fillStyle = flashing ? "#ffffff" : (cls && cls.rammer ? "#b06fd6" : "#3fb6f0");
+    ctx.fillStyle = flashing ? "#ffffff" : (useTeam ? teamCol.body : (cls && cls.rammer ? "#b06fd6" : "#3fb6f0"));
     ctx.fill();
     ctx.lineWidth = 3;
-    ctx.strokeStyle = cls && cls.rammer ? "#7a4fa0" : "#2a86ad";
+    ctx.strokeStyle = useTeam ? teamCol.stroke : (cls && cls.rammer ? "#7a4fa0" : "#2a86ad");
     ctx.stroke();
 
     // Auto-turret hub(s) on top of the body so they read as mounted turrets.
@@ -1363,6 +1883,15 @@
     ctx.fillRect(p.x - barW / 2, p.y - R - 18, barW, 6);
     ctx.fillStyle = ratio > 0.3 ? "#4caf50" : "#e05353";
     ctx.fillRect(p.x - barW / 2, p.y - R - 18, barW * ratio, 6);
+
+    // Username plate above the tank.
+    ctx.globalAlpha = player.invisAlpha;
+    ctx.fillStyle = (TEAM[player.team] || TEAM.ffa).name;
+    ctx.font = "700 14px -apple-system, system-ui, sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText(player.name || "mango", p.x, p.y - R - 26);
+    ctx.textAlign = "left";
+    ctx.globalAlpha = 1;
   }
 
   function drawStick(stick, label) {
@@ -1630,6 +2159,86 @@
     }
   }
 
+  // Top-right minimap: scales the 6000² world into a small square, honoring the
+  // notch safe area. Shows the player, bots (team-coloured), and a pulsing skull
+  // at the boss.
+  function getMinimapRect() {
+    var size = Math.min(140, view.w * 0.28);
+    return { x: view.w - size - 12 - safe.right, y: 12 + safe.top, w: size, h: size };
+  }
+  function drawSkull(cx, cy, r, alpha) {
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = "#ffffff";
+    ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fill();       // cranium
+    ctx.fillRect(cx - r * 0.8, cy, r * 1.6, r * 0.9);                       // jaw
+    ctx.fillStyle = "#111";
+    ctx.beginPath(); ctx.arc(cx - r * 0.4, cy - r * 0.1, r * 0.28, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(cx + r * 0.4, cy - r * 0.1, r * 0.28, 0, Math.PI * 2); ctx.fill();
+    ctx.fillRect(cx - r * 0.12, cy + r * 0.2, r * 0.24, r * 0.5);           // nose
+    ctx.restore();
+  }
+  function drawMinimap() {
+    var m = getMinimapRect();
+    ctx.fillStyle = "rgba(20,26,38,0.55)";
+    ctx.fillRect(m.x, m.y, m.w, m.h);
+    ctx.lineWidth = 2; ctx.strokeStyle = "rgba(255,255,255,0.25)";
+    ctx.strokeRect(m.x, m.y, m.w, m.h);
+    var sx = m.w / WORLD.w, sy = m.h / WORLD.h;
+    // bots
+    for (var i = 0; i < bots.length; i++) {
+      var bt = bots[i]; if (!bt.alive) continue;
+      ctx.fillStyle = (TEAM[bt.team] || TEAM.ffa).body;
+      ctx.beginPath(); ctx.arc(m.x + bt.x * sx, m.y + bt.y * sy, 2.5, 0, Math.PI * 2); ctx.fill();
+    }
+    // player
+    ctx.fillStyle = gameMode === "teams" ? (TEAM[player.team] || TEAM.ffa).name : "#ffffff";
+    ctx.beginPath(); ctx.arc(m.x + player.x * sx, m.y + player.y * sy, 4, 0, Math.PI * 2); ctx.fill();
+    ctx.lineWidth = 1.5; ctx.strokeStyle = "#000"; ctx.stroke();
+    // boss skull (pulsing)
+    if (boss) {
+      var pulse = 0.55 + 0.45 * Math.sin(performance.now() / 180);
+      drawSkull(m.x + boss.x * sx, m.y + boss.y * sy, 7, pulse);
+    }
+  }
+
+  function drawBossHealthBar() {
+    if (!boss) return;
+    // Only when the player is near the center arena.
+    if (Math.hypot(boss.x - player.x, boss.y - player.y) > BOSS_NEAR_DIST) return;
+    var w = Math.min(460, view.w * 0.7), h = 18;
+    var x = (view.w - w) / 2, y = 14 + safe.top;
+    ctx.fillStyle = "#fff"; ctx.font = "800 15px -apple-system, system-ui, sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText(boss.name, view.w / 2, y - 4);
+    ctx.fillStyle = "rgba(0,0,0,0.5)"; ctx.fillRect(x, y, w, h);
+    var ratio = Math.max(boss.hp / boss.maxHp, 0);
+    ctx.fillStyle = "#e0455a"; ctx.fillRect(x, y, w * ratio, h);
+    ctx.lineWidth = 2; ctx.strokeStyle = "rgba(255,255,255,0.35)"; ctx.strokeRect(x, y, w, h);
+    ctx.textAlign = "left";
+  }
+
+  function drawBossWarning() {
+    if (boss || !bossWarningActive) return;
+    if (Math.floor(performance.now() / 400) % 2 === 0) return; // blink
+    ctx.fillStyle = "#ff5a5a";
+    ctx.font = "800 " + Math.round(Math.min(26, view.w * 0.045)) + "px -apple-system, system-ui, sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText("WARNING: A Legendary Boss is spawning at the center!", view.w / 2, view.h * 0.16 + safe.top);
+    ctx.textAlign = "left";
+  }
+
+  function drawNotif() {
+    if (notif.timer <= 0) return;
+    ctx.globalAlpha = Math.min(1, notif.timer);
+    ctx.fillStyle = "#ffd54a";
+    ctx.font = "800 18px -apple-system, system-ui, sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText(notif.text, view.w / 2, view.h * 0.24 + safe.top);
+    ctx.textAlign = "left";
+    ctx.globalAlpha = 1;
+  }
+
   function render() {
     ctx.clearRect(0, 0, view.w, view.h);
     ctx.fillStyle = "#12141a";
@@ -1640,18 +2249,27 @@
     drawShapes();
     drawRemoteBullets();
     drawBullets();
+    drawDrones();
+    drawBots();
     drawRemotePlayers();
+    drawBoss();
     drawPlayer();
 
-    drawStick(moveStick);
-    drawStick(aimStick);
-    drawHUD();
-    drawStatusButton();
-    drawUpgradeMenu();
+    // Screen-space overlays.
+    drawMinimap();
+    drawBossHealthBar();
+    drawBossWarning();
+    drawNotif();
 
-    // Evolution overlay is drawn last so it sits on top of everything and
-    // fully covers the HUD/menu while an evolution choice is pending.
-    if (player.evolutionPending) drawEvolutionOverlay();
+    // In-game touch controls / HUD only while actually playing.
+    if (gameState === "playing") {
+      drawStick(moveStick);
+      drawStick(aimStick);
+      drawHUD();
+      drawStatusButton();
+      drawUpgradeMenu();
+      if (player.evolutionPending) drawEvolutionOverlay();
+    }
   }
 
   // ======================================================================
@@ -1666,16 +2284,89 @@
     lastTime = now;
 
     updatePlayer(dt);
+    updateBots(dt);
+    updateBoss(dt);
+    updateDrones(dt);
     updateBullets(dt);
     updateShapes(dt);
     checkCollisions();
+    checkCombat(dt);
     updateCamera(dt);
+    if (notif.timer > 0) notif.timer -= dt;
     NET.update(dt); // push local state to the server (no-op while offline)
 
     render();
 
     requestAnimationFrame(frame);
   }
+
+  // ======================================================================
+  // 9. LOBBY / MAIN MENU
+  // ======================================================================
+  var lobbyEl = document.getElementById("lobby");
+  var modeSel = document.getElementById("modeSel");
+  var regionSel = document.getElementById("regionSel");
+  var teamRow = document.getElementById("teamRow");
+  var teamWarn = document.getElementById("teamWarn");
+  var nameInput = document.getElementById("nameInput");
+  var playBtn = document.getElementById("playBtn");
+  var lobbyTeamChoice = "red";
+
+  // Count how bots WOULD split so we can lock the overpopulated side for balance.
+  function teamCounts() {
+    var red = 0, blue = 0;
+    for (var i = 0; i < NUM_BOTS; i++) { if (i % 2 === 0) red++; else blue++; }
+    return { red: red, blue: blue };
+  }
+  function refreshTeamUI() {
+    var teams = gameMode === "teams";
+    teamRow.style.display = teams ? "flex" : "none";
+    teamWarn.textContent = "";
+    if (!teams) return;
+    var c = teamCounts();
+    // Include the player's provisional pick when judging balance.
+    var redTotal = c.red + (lobbyTeamChoice === "red" ? 1 : 0);
+    var blueTotal = c.blue + (lobbyTeamChoice === "blue" ? 1 : 0);
+    var btns = teamRow.querySelectorAll(".teamBtn");
+    for (var i = 0; i < btns.length; i++) {
+      var t = btns[i].getAttribute("data-team");
+      // Lock a side if picking it would make it outnumber the other.
+      var wouldRed = c.red + (t === "red" ? 1 : 0);
+      var wouldBlue = c.blue + (t === "blue" ? 1 : 0);
+      var locked = (t === "red" && wouldRed > wouldBlue + 1) || (t === "blue" && wouldBlue > wouldRed + 1);
+      btns[i].classList.toggle("locked", locked);
+      btns[i].classList.toggle("selected", lobbyTeamChoice === t && !locked);
+      btns[i].disabled = locked;
+      if (locked && lobbyTeamChoice === t) {
+        teamWarn.textContent = "Team Full - Joining Locked for Balance";
+      }
+    }
+  }
+  modeSel.addEventListener("change", function () {
+    gameMode = modeSel.value === "teams" ? "teams" : "ffa";
+    refreshTeamUI();
+  });
+  teamRow.addEventListener("click", function (e) {
+    var btn = e.target.closest ? e.target.closest(".teamBtn") : null;
+    if (!btn || btn.disabled) return;
+    lobbyTeamChoice = btn.getAttribute("data-team");
+    refreshTeamUI();
+  });
+  function startGame() {
+    playerName = (nameInput.value || "").trim().slice(0, 16) || "mango";
+    gameMode = modeSel.value === "teams" ? "teams" : "ffa";
+    playerTeam = gameMode === "teams" ? lobbyTeamChoice : "ffa";
+    // Fresh player with the chosen identity, and bots split for the mode.
+    Object.assign(player, makePlayer());
+    initBots();
+    bossTimer = BOSS_INTERVAL; boss = null; drones = []; bossWarningActive = false;
+    notif = { text: "", timer: 0 };
+    gameState = "playing";
+    lobbyEl.classList.add("hidden");
+  }
+  playBtn.addEventListener("click", startGame);
+  refreshTeamUI();
+  initBots(); // populate the arena so the lobby background is lively
 
   requestAnimationFrame(frame);
 })();
