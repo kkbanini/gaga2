@@ -107,20 +107,23 @@
     bulletSpeed: 620,
     bulletRadius: 7,
     bulletLife: 0.9,
-    contactDamage: 10,
-    hitCooldown: 0.5   // invulnerability window after taking contact damage
+    contactDamage: 10, // ram damage the PLAYER takes per collision tick
+    bodyDamage: 20,    // ram damage the player DEALS to a shape per collision tick
+    hitCooldown: 0.5   // per-collision tick: both invuln window AND ram-damage cadence
   };
 
   // --- Skill-point upgrade system ---
   // Each stat can be leveled up to MAX_TIER times by spending skill points,
-  // which are earned one-per-level-up. The 4 defs below drive both the touch
-  // button bar and the effective-stat math in recomputeStats().
+  // which are earned one-per-level-up. The 6 defs below drive both the touch
+  // upgrade menu and the effective-stat math in recomputeStats().
   var MAX_TIER = 8;
   var UPGRADES = [
-    { key: "speed",  label: "Speed",  color: "#4caf50" },
-    { key: "reload", label: "Reload", color: "#f2c14e" },
-    { key: "damage", label: "Damage", color: "#e05353" },
-    { key: "health", label: "Health", color: "#4d8fe0" }
+    { key: "speed",  label: "Speed",    color: "#4caf50" },
+    { key: "reload", label: "Reload",   color: "#f2c14e" },
+    { key: "damage", label: "Damage",   color: "#e05353" },
+    { key: "health", label: "Health",   color: "#4d8fe0" },
+    { key: "body",   label: "Body Dmg", color: "#e0873a" }, // ram damage dealt to shapes
+    { key: "shield", label: "Shield",   color: "#3ac6c6" }  // reduces ram damage taken
   ];
 
   // --- Health regeneration ---
@@ -144,6 +147,11 @@
   // --- Tier 2 class evolution (diep.io style) ---
   // At EVOLVE_LEVEL the player picks one permanent Tier 2 class, which changes
   // fireBullet()'s behavior (fireMode) and scales reload/damage/speed/accuracy.
+  // The *Mult fields default to 1 when omitted (see recomputeStats/fireBullet),
+  // so only classes that deviate from baseline list them:
+  //   speedMult      -> bullet speed        moveSpeedMult -> tank movement speed
+  //   damageMult     -> bullet damage       bodyMult      -> ram (body) damage
+  //   hpMult         -> max health          bodyRadiusMult-> body/hitbox size
   var EVOLVE_LEVEL = 15;
   var CLASSES = {
     twin: {
@@ -169,9 +177,18 @@
       fireMode: "flank", offset: 0,
       reloadMult: 1, damageMult: 1, speedMult: 1, inaccuracy: 0,
       barrelLen: 1, barrelWidth: 1
+    },
+    smasher: {
+      label: "Smasher", color: "#b06fd6", desc: "Pure rammer: no gun, huge body damage, tanky and fast",
+      fireMode: "none", rammer: true,
+      // No gun at all; power comes from ramming. Big passive buffs to body
+      // damage, health, and movement speed, plus a larger body for a true
+      // diep.io Smasher feel.
+      bodyMult: 2.6, hpMult: 1.7, moveSpeedMult: 1.28, bodyRadiusMult: 1.35,
+      barrelLen: 0, barrelWidth: 0
     }
   };
-  var CLASS_ORDER = ["twin", "sniper", "machinegun", "flank"]; // stable order for the choice overlay
+  var CLASS_ORDER = ["twin", "sniper", "machinegun", "flank", "smasher"]; // stable order for the choice overlay
 
   // ======================================================================
   // 3. INPUT: DUAL VIRTUAL JOYSTICKS + DESKTOP FALLBACK
@@ -369,37 +386,54 @@
       fireTimer: 0,
       hitTimer: 0,
       regenTimer: 0,          // seconds since last damage taken
+      bodySpin: 0,            // decorative rotation for the Smasher spike ring
       level: 1,
       xp: 0,
       xpToNext: 100,
       skillPoints: 0,
-      stats: { speed: 0, reload: 0, damage: 0, health: 0 }, // tiers spent per stat
+      stats: { speed: 0, reload: 0, damage: 0, health: 0, body: 0, shield: 0 }, // tiers spent per stat
       tankClass: null,        // Tier 2 class key once chosen (see CLASSES), null before EVOLVE_LEVEL
       evolutionPending: false, // true while the class-choice overlay should be shown
       // Effective stats, seeded to tier-0 base so update code needs no branching.
-      // recomputeStats() rewrites these whenever an upgrade is purchased.
+      // recomputeStats() rewrites these whenever an upgrade or class is chosen.
       moveAccel: PLAYER_BASE.accel,
       moveMaxSpeed: PLAYER_BASE.maxSpeed,
       fireCooldownEff: PLAYER_BASE.fireCooldown,
-      bulletDamageEff: PLAYER_BASE.bulletDamage
+      bulletDamageEff: PLAYER_BASE.bulletDamage,
+      bodyDamageEff: PLAYER_BASE.bodyDamage, // ram damage dealt to shapes
+      damageTakenMult: 1                     // <1 once Shield is upgraded
     };
   }
   var player = makePlayer();
 
-  // Translate the player's spent stat tiers into concrete effective values.
-  // Called after every upgrade purchase (not per-frame) so the update loop can
-  // just read the pre-computed fields.
+  // Translate the player's spent stat tiers (and chosen class) into concrete
+  // effective values. Fully recomputes from base every call, so it's safe to
+  // call after any upgrade purchase OR class choice. Read per-frame by the
+  // update loop, which needs no class/tier branching of its own.
   function recomputeStats(p) {
     var s = p.stats;
-    p.moveAccel = PLAYER_BASE.accel * (1 + 0.08 * s.speed);
-    p.moveMaxSpeed = PLAYER_BASE.maxSpeed * (1 + 0.08 * s.speed);
+    var cls = p.tankClass ? CLASSES[p.tankClass] : null;
+    var moveMul = cls && cls.moveSpeedMult ? cls.moveSpeedMult : 1;
+    var bodyMul = cls && cls.bodyMult ? cls.bodyMult : 1;
+    var hpMul = cls && cls.hpMult ? cls.hpMult : 1;
+    var radiusMul = cls && cls.bodyRadiusMult ? cls.bodyRadiusMult : 1;
+
+    p.moveAccel = PLAYER_BASE.accel * (1 + 0.08 * s.speed) * moveMul;
+    p.moveMaxSpeed = PLAYER_BASE.maxSpeed * (1 + 0.08 * s.speed) * moveMul;
     // Division (not subtraction) keeps the cooldown strictly positive — a
     // subtractive formula could reach zero/negative at high tiers.
     p.fireCooldownEff = PLAYER_BASE.fireCooldown / (1 + 0.12 * s.reload);
     p.bulletDamageEff = PLAYER_BASE.bulletDamage * (1 + 0.15 * s.damage);
-    // Health: recompute max, and add the gained headroom to current hp so
-    // buying Health heals immediately rather than just raising the ceiling.
-    var newMax = Math.round(PLAYER_BASE.maxHp * (1 + 0.15 * s.health));
+    // Body (ram) damage: stat tiers stack multiplicatively with the class buff.
+    p.bodyDamageEff = PLAYER_BASE.bodyDamage * (1 + 0.25 * s.body) * bodyMul;
+    // Shield: fraction of incoming ram damage actually taken (<1 = tankier).
+    // Division keeps it in (0,1], approaching but never reaching 0.
+    p.damageTakenMult = 1 / (1 + 0.15 * s.shield);
+    // Rammer classes (Smasher) get a bigger body — larger ram hitbox + visual.
+    p.radius = PLAYER_BASE.radius * radiusMul;
+    // Health: base * health-tier * class hp multiplier. Add the gained
+    // headroom to current hp so buying Health/evolving heals immediately.
+    var newMax = Math.round(PLAYER_BASE.maxHp * (1 + 0.15 * s.health) * hpMul);
     var delta = newMax - p.maxHp;
     p.maxHp = newMax;
     if (delta > 0) p.hp = Math.min(newMax, p.hp + delta);
@@ -423,6 +457,7 @@
     if (!player.evolutionPending || !CLASSES[key]) return;
     player.tankClass = key;
     player.evolutionPending = false;
+    recomputeStats(player); // apply the class's passive stat buffs right away
   }
 
   function spawnShape() {
@@ -467,9 +502,10 @@
 
   function fireBullet() {
     var cls = player.tankClass ? CLASSES[player.tankClass] : null;
+    var fireMode = cls ? cls.fireMode : "single";
+    if (fireMode === "none") return; // gunless rammer classes (Smasher)
     var speed = PLAYER_BASE.bulletSpeed * (cls ? cls.speedMult : 1);
     var dmg = player.bulletDamageEff * (cls ? cls.damageMult : 1);
-    var fireMode = cls ? cls.fireMode : "single";
 
     if (fireMode === "twin") {
       spawnBullet(player.turretAngle, cls.offset, speed, dmg);
@@ -551,6 +587,7 @@
     }
 
     if (player.hitTimer > 0) player.hitTimer -= dt;
+    player.bodySpin += dt * 1.5; // slow rotation for the Smasher spike ring
 
     // Health regeneration: after REGEN_DELAY seconds without taking damage,
     // slowly heal at a rate proportional to maxHp (so it scales with the
@@ -629,7 +666,11 @@
       if (hit) bullets.splice(bi, 1);
     }
 
-    // Player vs shapes: damage (rate-limited) + gentle knockback separation
+    // Player vs shapes: TWO-WAY ram damage (rate-limited) + knockback.
+    // On each collision tick (gated by hitTimer) the player deals Body Damage
+    // to the shape AND takes contact damage (reduced by Shield) from it — the
+    // Rammer mechanic. Ticking on the same timer keeps the exchange fair and
+    // stops a single overlapping frame from instantly deleting the shape.
     for (var i = 0; i < shapes.length; i++) {
       var sh = shapes[i];
       var dx = player.x - sh.x, dy = player.y - sh.y;
@@ -646,10 +687,19 @@
         sh.y -= ny * overlap * 0.5;
 
         if (player.hitTimer <= 0) {
-          player.hp -= PLAYER_BASE.contactDamage;
+          // Shape takes the player's body damage.
+          sh.hp -= player.bodyDamageEff;
+          // Player takes contact damage, mitigated by the Shield stat.
+          player.hp -= PLAYER_BASE.contactDamage * player.damageTakenMult;
           player.hitTimer = PLAYER_BASE.hitCooldown;
           player.regenTimer = 0;   // taking damage restarts the regen delay
-          if (player.hp <= 0) respawnPlayer();
+
+          if (sh.hp <= 0) {
+            grantXp(SHAPE_TYPES[sh.type].xp * XP_MULTIPLIER); // ram kills grant XP too
+            shapes.splice(i, 1);
+            i--;
+          }
+          if (player.hp <= 0) { respawnPlayer(); break; }
         }
       }
     }
@@ -749,35 +799,57 @@
     var p = worldToScreen(player.x, player.y);
     // flash while invulnerable after taking a hit
     var flashing = player.hitTimer > 0 && Math.floor(player.hitTimer * 12) % 2 === 0;
+    var cls = player.tankClass ? CLASSES[player.tankClass] : null;
 
-    // Barrel(s) — shape/count depends on the chosen Tier 2 class, if any.
+    // Rammer classes (Smasher) draw a slowly-spinning dark hex spike ring
+    // behind the body instead of a barrel, evoking the diep.io Smasher look.
+    if (cls && cls.rammer) {
+      ctx.save();
+      ctx.translate(p.x, p.y);
+      ctx.rotate(player.bodySpin);
+      ctx.beginPath();
+      var spikes = 6, rOuter = player.radius + 7;
+      for (var k = 0; k < spikes; k++) {
+        var a = (k / spikes) * Math.PI * 2;
+        var sx = Math.cos(a) * rOuter, sy = Math.sin(a) * rOuter;
+        if (k === 0) ctx.moveTo(sx, sy); else ctx.lineTo(sx, sy);
+      }
+      ctx.closePath();
+      ctx.fillStyle = "#6f4a94";
+      ctx.fill();
+      ctx.restore();
+    }
+
+    // Barrel(s) — shape/count depends on the chosen Tier 2 class. Gunless
+    // rammer classes (fireMode "none") skip this entirely.
     // Drawing happens inside a frame already rotated to turretAngle, so
     // "forward" is always +x and "backward" (Flank Guard's rear barrel) is -x.
-    ctx.save();
-    ctx.translate(p.x, p.y);
-    ctx.rotate(player.turretAngle);
-    ctx.fillStyle = "#8fa3b3";
-    var cls = player.tankClass ? CLASSES[player.tankClass] : null;
-    var bLen = (player.radius + 18) * (cls ? cls.barrelLen : 1);
-    var bWid = 14 * (cls ? cls.barrelWidth : 1);
-    if (cls && cls.fireMode === "twin") {
-      ctx.fillRect(0, cls.offset - bWid / 2, bLen, bWid);
-      ctx.fillRect(0, -cls.offset - bWid / 2, bLen, bWid);
-    } else if (cls && cls.fireMode === "flank") {
-      ctx.fillRect(0, -bWid / 2, bLen, bWid);
-      ctx.fillRect(-bLen, -bWid / 2, bLen, bWid);
-    } else {
-      ctx.fillRect(0, -bWid / 2, bLen, bWid);
+    if (!cls || cls.fireMode !== "none") {
+      ctx.save();
+      ctx.translate(p.x, p.y);
+      ctx.rotate(player.turretAngle);
+      ctx.fillStyle = "#8fa3b3";
+      var bLen = (player.radius + 18) * (cls ? cls.barrelLen : 1);
+      var bWid = 14 * (cls ? cls.barrelWidth : 1);
+      if (cls && cls.fireMode === "twin") {
+        ctx.fillRect(0, cls.offset - bWid / 2, bLen, bWid);
+        ctx.fillRect(0, -cls.offset - bWid / 2, bLen, bWid);
+      } else if (cls && cls.fireMode === "flank") {
+        ctx.fillRect(0, -bWid / 2, bLen, bWid);
+        ctx.fillRect(-bLen, -bWid / 2, bLen, bWid);
+      } else {
+        ctx.fillRect(0, -bWid / 2, bLen, bWid);
+      }
+      ctx.restore();
     }
-    ctx.restore();
 
-    // Body
+    // Body — rammer classes get their class color to read as a distinct build.
     ctx.beginPath();
     ctx.arc(p.x, p.y, player.radius, 0, Math.PI * 2);
-    ctx.fillStyle = flashing ? "#ffffff" : "#3fb6f0";
+    ctx.fillStyle = flashing ? "#ffffff" : (cls && cls.rammer ? "#b06fd6" : "#3fb6f0");
     ctx.fill();
     ctx.lineWidth = 3;
-    ctx.strokeStyle = "#2a86ad";
+    ctx.strokeStyle = cls && cls.rammer ? "#7a4fa0" : "#2a86ad";
     ctx.stroke();
 
     // HP bar above the tank
@@ -889,9 +961,10 @@
     ctx.textAlign = "left";
   }
 
-  // The 4 stat-upgrade buttons, laid out as a compact 2x2 grid directly below
-  // the Status button. Only meaningful (drawn/hit-tested) while the menu is
-  // open AND skill points are available — see drawUpgradeMenu / handleUiTap.
+  // The 6 stat-upgrade buttons, laid out as a compact 2-column grid (3 rows)
+  // directly below the Status button. Only meaningful (drawn/hit-tested) while
+  // the menu is open AND skill points are available — see drawUpgradeMenu /
+  // handleUiTap.
   function getExpandedUpgradeButtons() {
     var sb = getStatusButtonRect();
     var gap = 8, bw = 88, bh = 38, cols = 2;
@@ -938,8 +1011,8 @@
     }
   }
 
-  // 4 large class-choice cards, laid out as a row in landscape or a 2x2 grid
-  // in portrait, centered on screen.
+  // Large class-choice cards (one per CLASS_ORDER entry), laid out as a single
+  // row in landscape or a 2-column grid in portrait, centered on screen.
   function getEvolutionCards() {
     var margin = 20, gap = 16;
     var cols = view.w > view.h ? CLASS_ORDER.length : 2;
