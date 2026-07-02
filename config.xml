@@ -13,7 +13,7 @@
 
     <preference name="Fullscreen" value="true" />
     <preference name="DisallowOverscroll" value="true" />
-    <preference name="BackgroundColor" value="0xff12141a" />
+    <preference name="BackgroundColor" value="#FF12141A" />
 
     <!--
       No <Orientation> preference on purpose: the game's own responsive
