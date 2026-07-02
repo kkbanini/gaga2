@@ -38,7 +38,13 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Configure Pages
+        # enablement: true asks the action to turn on GitHub Pages (source:
+        # GitHub Actions) via the API if it isn't already, so a fresh repo can
+        # deploy without a manual settings change. If org/permission policy
+        # blocks auto-enable, enable it once under Settings -> Pages.
         uses: actions/configure-pages@v5
+        with:
+          enablement: true
 
       - name: Upload OTA assets (/docs)
         uses: actions/upload-pages-artifact@v3
