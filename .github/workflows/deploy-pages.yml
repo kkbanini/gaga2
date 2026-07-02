@@ -1,11 +1,15 @@
 name: Deploy OTA assets to GitHub Pages
 
-# Publishes the /docs folder (version.json + game.html) to GitHub Pages so the
-# APK bootstrapper can fetch and cache updates over-the-air.
+# Publishes the /docs folder (version.json + game.html) to a `gh-pages` branch,
+# which GitHub Pages then serves at https://<owner>.github.io/<repo>/.
+#
+# This uses a plain git push (not the GitHub Actions Pages deployment API), so
+# it succeeds with the default GITHUB_TOKEN and does NOT require Pages to be
+# pre-enabled — the workflow stays green and simply publishes the branch.
 #
 # One-time setup by the repo owner: Settings -> Pages -> Build and deployment ->
-# Source: "GitHub Actions". After that, every push that touches docs/ redeploys
-# the OTA assets to https://<owner>.github.io/<repo>/.
+# Source: "Deploy from a branch" -> Branch: gh-pages / (root). After that, every
+# push touching docs/ republishes the OTA assets.
 
 on:
   push:
@@ -18,39 +22,32 @@ on:
   workflow_dispatch: {}
 
 permissions:
-  contents: read
-  pages: write
-  id-token: write
+  contents: write   # needed to push the gh-pages branch
 
-# Allow one concurrent deployment; newer pushes supersede in-progress ones.
 concurrency:
-  group: pages
+  group: pages-deploy
   cancel-in-progress: true
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Configure Pages
-        # enablement: true asks the action to turn on GitHub Pages (source:
-        # GitHub Actions) via the API if it isn't already, so a fresh repo can
-        # deploy without a manual settings change. If org/permission policy
-        # blocks auto-enable, enable it once under Settings -> Pages.
-        uses: actions/configure-pages@v5
-        with:
-          enablement: true
-
-      - name: Upload OTA assets (/docs)
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: docs
-
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v4
+      - name: Publish docs/ to gh-pages branch
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          # .nojekyll stops GitHub Pages' Jekyll from touching the assets.
+          touch docs/.nojekyll
+          cd docs
+          git init -q
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -q -m "Deploy OTA assets (${GITHUB_SHA::7})"
+          git branch -M gh-pages
+          git push -f "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" gh-pages
+          echo "Published docs/ to the gh-pages branch."
