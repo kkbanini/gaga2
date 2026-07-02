@@ -1,8 +1,41 @@
 # Tank Arena
 
-A Diep.io-style top-down tank shooter for mobile, built as a single-file HTML5
-Canvas game (`www/index.html`) and packaged for Android with [Apache
-Cordova](https://cordova.apache.org/).
+A Diep.io-style top-down tank shooter for mobile, packaged for Android with
+[Apache Cordova](https://cordova.apache.org/) and updated over-the-air (OTA) so
+the APK only has to be compiled once.
+
+## Architecture (OTA patch-loader)
+
+The APK ships a tiny **bootstrapper** and a **bundled fallback** of the game;
+the real game is hosted on GitHub Pages and updated without recompiling:
+
+| File | Role |
+| --- | --- |
+| `www/index.html` | OTA bootstrapper compiled into the APK. Shows a loading overlay, checks the remote version, downloads/caches the game, then boots it. Contains no game logic. |
+| `docs/game.html` | **Canonical game** (all logic: 6000² map, dense shapes, 25-class evolution tree, joysticks, Status menu). Served from GitHub Pages. |
+| `docs/version.json` | `{"version": "1.0.2", ...}` — bump `version` to ship an update. |
+| `www/game.html` | Bundled fallback copy, generated from `docs/game.html` by `npm run sync:game` (git-ignored). Guarantees the APK runs on a fresh offline first-run. |
+
+**Boot flow:** on launch the bootstrapper fetches `docs/version.json` from Pages,
+compares it to the version cached locally (Cache Storage API, falling back to
+`localStorage`). If the remote version is newer it downloads `game.html` with a
+progress bar ("Downloading new update data… Please wait."), caches it with a
+cache-busting query, and boots it in a full-screen iframe. If the app is up to
+date, offline, or the download fails, it instantly boots the last cached copy —
+or the bundled fallback on a fresh offline first-run — so the game is always
+playable.
+
+### Shipping an update (no recompile)
+
+1. Edit `docs/game.html`.
+2. Bump `"version"` in `docs/version.json` (e.g. `1.0.2` → `1.0.3`).
+3. Push. The `deploy-pages` workflow publishes `docs/` to GitHub Pages.
+4. Existing installs pick up the update on their next launch.
+
+The bootstrapper's `OTA_BASE` defaults to `https://kkbanini.github.io/gaga2/`
+(override with `window.OTA_BASE_URL`). **One-time setup:** enable GitHub Pages
+(Settings → Pages → Source: *GitHub Actions*) so the OTA endpoint goes live.
+Until then the APK still runs fine from its bundled fallback.
 
 ## Gameplay features
 
@@ -22,16 +55,18 @@ Cordova](https://cordova.apache.org/).
 
 ## Try it instantly (no build required)
 
-The game is plain HTML/CSS/JS with no dependencies, so you can just open it
-in a browser:
+The game is plain HTML/CSS/JS with no dependencies. To play the game directly
+(bypassing the OTA bootstrapper), serve the `docs/` folder and open
+`game.html`:
 
 ```
-python3 -m http.server 8000 -d www
+python3 -m http.server 8000 -d docs
 ```
 
-Then visit `http://localhost:8000`. Use WASD + mouse to play on desktop, or
-open Chrome DevTools' device toolbar (touch emulation) to try the dual
-virtual joysticks.
+Then visit `http://localhost:8000/game.html`. Use WASD + mouse to play on
+desktop, or open Chrome DevTools' device toolbar (touch emulation) to try the
+dual virtual joysticks. To exercise the full OTA boot flow instead, serve `www/`
+(run `npm run sync:game` first) and open its `index.html`.
 
 ## Building a real Android .apk
 

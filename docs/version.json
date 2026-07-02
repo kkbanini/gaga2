@@ -1,0 +1,5 @@
+{
+  "version": "1.0.2",
+  "game": "game.html",
+  "notes": "Tank Arena OTA manifest. Bump 'version' whenever game.html changes so clients download and cache the new build."
+}

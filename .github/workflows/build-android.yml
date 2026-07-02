@@ -30,6 +30,9 @@ jobs:
       - name: Install project dependencies
         run: npm install
 
+      - name: Sync bundled fallback game (docs/game.html -> www/game.html)
+        run: npm run sync:game
+
       - name: Add Android platform
         run: npx cordova platform add android
 

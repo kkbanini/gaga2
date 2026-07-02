@@ -1,0 +1,50 @@
+name: Deploy OTA assets to GitHub Pages
+
+# Publishes the /docs folder (version.json + game.html) to GitHub Pages so the
+# APK bootstrapper can fetch and cache updates over-the-air.
+#
+# One-time setup by the repo owner: Settings -> Pages -> Build and deployment ->
+# Source: "GitHub Actions". After that, every push that touches docs/ redeploys
+# the OTA assets to https://<owner>.github.io/<repo>/.
+
+on:
+  push:
+    branches:
+      - claude/diep-io-mobile-game-j3hy0u
+      - main
+    paths:
+      - "docs/**"
+      - ".github/workflows/deploy-pages.yml"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Allow one concurrent deployment; newer pushes supersede in-progress ones.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload OTA assets (/docs)
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

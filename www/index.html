@@ -3,1540 +3,339 @@
 <head>
 <meta charset="UTF-8">
 <!--
-  viewport-fit=cover + user-scalable=no keep the page from zooming/scrolling
-  on mobile so touch drags always control the joysticks, never the browser.
-  viewport-fit=cover is also what exposes the safe-area-inset env() values
-  used below (notch/home-indicator padding on iPhones).
+  OTA BOOTSTRAPPER
+  ================
+  This is the ONLY file compiled into the APK's shell (plus a bundled fallback
+  copy of the game at www/game.html). It never contains game logic itself — it
+  boots the game over-the-air:
+    1. Show a full-screen loading overlay.
+    2. Fetch version.json from the live GitHub Pages site.
+    3. Compare the remote version to the one cached locally (Cache Storage,
+       falling back to localStorage).
+    4. If newer, download game.html (with a progress bar + cache-busting),
+       cache it, then boot it.
+    5. If up-to-date / offline / any failure, boot the last cached copy, or the
+       bundled fallback on a fresh offline first-run.
+  Because the bundled fallback always works, the APK is never broken even before
+  GitHub Pages is live — OTA simply activates once the endpoint is reachable.
 -->
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, minimum-scale=1, user-scalable=no, viewport-fit=cover">
-<!-- iOS standalone / WebView hints -->
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="mobile-web-app-capable" content="yes">
 <title>Tank Arena</title>
 <style>
+  :root { --accent: #3fb6f0; --accent2: #b06fd6; }
   html, body {
-    margin: 0;
-    padding: 0;
-    width: 100%;
-    height: 100%;
-    /* position:fixed on both is the reliable way to kill iOS Safari's
-       rubber-band / bounce scrolling, which overflow:hidden alone doesn't. */
-    position: fixed;
-    top: 0;
-    left: 0;
-    overflow: hidden;
-    background: #12141a;
-    touch-action: none;                    /* no OS pan/zoom from drags */
-    -webkit-user-select: none;
-    user-select: none;
-    -webkit-touch-callout: none;           /* no long-press callout on iOS */
-    -webkit-tap-highlight-color: transparent;
-    overscroll-behavior: none;
-  }
-  #game {
-    position: fixed;
-    top: 0;
-    left: 0;
-    width: 100%;
-    height: 100%;
-    display: block;
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    position: fixed; top: 0; left: 0; overflow: hidden;
+    background: #0d0f14;
     touch-action: none;
+    -webkit-user-select: none; user-select: none;
+    -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent;
+    overscroll-behavior: none;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
   }
-  /* Hidden probe: its padding resolves the safe-area-inset env() values so JS
-     can read them via getComputedStyle (canvas can't read env() directly). */
-  #safeprobe {
-    position: fixed;
-    top: 0; left: 0;
-    width: 0; height: 0;
-    padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
-    visibility: hidden;
-    pointer-events: none;
+  /* The booted game lives in this full-screen iframe. */
+  #gameframe {
+    position: fixed; inset: 0; width: 100%; height: 100%;
+    border: 0; margin: 0; padding: 0; display: block;
+    background: #12141a;
   }
-  /* Simple "rotate device" hint shown only in narrow portrait phone widths.
-     Gameplay still works in portrait (see Section 1 of the JS), this is
-     just a nudge toward the preferred landscape orientation. */
-  #rotateHint {
-    position: fixed;
-    inset: 0;
-    display: none;
-    align-items: center;
-    justify-content: center;
-    background: rgba(10,10,14,0.92);
-    color: #fff;
-    font: 600 18px/1.4 -apple-system, system-ui, sans-serif;
-    text-align: center;
-    z-index: 50;
-    pointer-events: none;
-    padding: 24px;
+  /* Full-screen loading overlay. */
+  #overlay {
+    position: fixed; inset: 0; z-index: 10;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    gap: 22px;
+    padding: calc(24px + env(safe-area-inset-top)) 24px calc(24px + env(safe-area-inset-bottom));
+    background:
+      radial-gradient(120% 80% at 50% 0%, #1a2030 0%, #0d0f14 60%, #08090d 100%);
+    color: #eef2f6;
+    transition: opacity 0.35s ease;
   }
-  @media (max-width: 600px) and (orientation: portrait) {
-    #rotateHint { display: flex; }
+  #overlay.hidden { opacity: 0; pointer-events: none; }
+  .logo {
+    font-size: clamp(30px, 8vw, 54px);
+    font-weight: 800; letter-spacing: 0.5px;
+    background: linear-gradient(90deg, var(--accent), var(--accent2));
+    -webkit-background-clip: text; background-clip: text;
+    -webkit-text-fill-color: transparent;
+    text-align: center; line-height: 1.05;
   }
+  .tagline { font-size: 13px; color: #8b96a5; margin-top: -12px; letter-spacing: 2px; text-transform: uppercase; }
+  .bar-wrap {
+    width: min(320px, 78vw); height: 12px; border-radius: 999px;
+    background: rgba(255,255,255,0.10);
+    overflow: hidden; position: relative;
+    box-shadow: inset 0 0 0 1px rgba(255,255,255,0.08);
+  }
+  .bar-fill {
+    position: absolute; left: 0; top: 0; bottom: 0; width: 0%;
+    border-radius: 999px;
+    background: linear-gradient(90deg, var(--accent), var(--accent2));
+    transition: width 0.18s ease;
+  }
+  /* Indeterminate sweep used before we know the download size. */
+  .bar-wrap.indet .bar-fill {
+    width: 40%; animation: sweep 1.1s ease-in-out infinite;
+  }
+  @keyframes sweep {
+    0%   { left: -42%; }
+    100% { left: 100%; }
+  }
+  #status { font-size: 15px; color: #c7d0da; min-height: 20px; text-align: center; }
+  #pct { font-size: 13px; color: #8b96a5; font-variant-numeric: tabular-nums; }
+  #verline {
+    position: fixed; bottom: calc(14px + env(safe-area-inset-bottom));
+    left: 0; right: 0; text-align: center;
+    font-size: 11px; color: #5c6672; letter-spacing: 0.5px;
+  }
+  .spinner {
+    width: 34px; height: 34px; border-radius: 50%;
+    border: 3px solid rgba(255,255,255,0.15);
+    border-top-color: var(--accent);
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
 </style>
 </head>
 <body>
-<canvas id="game"></canvas>
-<div id="safeprobe"></div>
-<div id="rotateHint">Rotate your device to landscape<br>for the best experience</div>
+<div id="overlay">
+  <div class="logo">TANK<br>ARENA</div>
+  <div class="tagline">Loading</div>
+  <div class="spinner" id="spinner"></div>
+  <div class="bar-wrap indet" id="bar"><div class="bar-fill" id="barFill"></div></div>
+  <div id="status">Starting…</div>
+  <div id="pct"></div>
+  <div id="verline"></div>
+</div>
 
 <script>
 (function () {
   "use strict";
 
-  // ======================================================================
-  // 1. CANVAS SETUP + RESPONSIVE SCALING
-  //    The backing store is sized in real device pixels (capped at 2x DPR
-  //    so huge canvases don't tank fill-rate on low-end phones) while CSS
-  //    keeps the element itself filling the viewport. Everything else in
-  //    the game reads logical size from `view.w` / `view.h`.
-  // ======================================================================
-  var canvas = document.getElementById("game");
-  var ctx = canvas.getContext("2d");
-  var safeprobe = document.getElementById("safeprobe");
+  // ===== OTA configuration =====================================================
+  // Where version.json and game.html are hosted. GitHub Pages serving the repo's
+  // /docs folder exposes them at the repo site root. Override at runtime by
+  // defining window.OTA_BASE_URL before this script runs.
+  var OTA_BASE = (window.OTA_BASE_URL || "https://kkbanini.github.io/gaga2/").replace(/\/?$/, "/");
+  // Version of the game.html bundled inside the APK (www/game.html). OTA only
+  // downloads when the remote version is newer than this / the cached one.
+  var BUNDLED_VERSION = "1.0.2";
+  var CACHE_NAME = "tank-arena-ota-v1";
+  var VERSION_TIMEOUT_MS = 6000; // don't make offline users wait long
+  var MIN_OVERLAY_MS = 650;      // avoid a jarring flash on fast boots
 
-  var view = { w: 0, h: 0, dpr: 1 };
-  // Safe-area insets (notch / home indicator). Read from #safeprobe's resolved
-  // env() padding so HUD/controls don't hide under iPhone hardware cutouts.
-  var safe = { top: 0, right: 0, bottom: 0, left: 0 };
+  // ===== DOM helpers ===========================================================
+  var overlay = document.getElementById("overlay");
+  var barWrap = document.getElementById("bar");
+  var barFill = document.getElementById("barFill");
+  var statusEl = document.getElementById("status");
+  var pctEl = document.getElementById("pct");
+  var verEl = document.getElementById("verline");
+  var spinner = document.getElementById("spinner");
+  var startedAt = Date.now();
 
-  function readSafeInsets() {
-    var cs = getComputedStyle(safeprobe);
-    safe.top = parseFloat(cs.paddingTop) || 0;
-    safe.right = parseFloat(cs.paddingRight) || 0;
-    safe.bottom = parseFloat(cs.paddingBottom) || 0;
-    safe.left = parseFloat(cs.paddingLeft) || 0;
+  function setStatus(txt) { statusEl.textContent = txt; }
+  function setVersionLine(txt) { verEl.textContent = txt; }
+  function setIndeterminate(on) {
+    if (on) { barWrap.classList.add("indet"); barFill.style.width = ""; pctEl.textContent = ""; }
+    else { barWrap.classList.remove("indet"); }
+  }
+  function setProgress(frac) {
+    // frac null -> indeterminate; 0..1 -> determinate
+    if (frac == null) { setIndeterminate(true); return; }
+    setIndeterminate(false);
+    var p = Math.max(0, Math.min(1, frac));
+    barFill.style.width = (p * 100).toFixed(0) + "%";
+    pctEl.textContent = (p * 100).toFixed(0) + "%";
   }
 
-  function resize() {
-    var dpr = Math.min(window.devicePixelRatio || 1, 2);
-    var w = window.innerWidth;
-    var h = window.innerHeight;
-    view.w = w;
-    view.h = h;
-    view.dpr = dpr;
-    canvas.width = Math.round(w * dpr);
-    canvas.height = Math.round(h * dpr);
-    canvas.style.width = w + "px";
-    canvas.style.height = h + "px";
-    // Draw in logical (CSS) pixels; the transform handles the DPR scaling.
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    readSafeInsets();
+  // ===== Local storage of the cached game ======================================
+  // Prefer the Cache Storage API; fall back to localStorage if it's unavailable
+  // (e.g. an insecure-context WebView). Version string is always kept in
+  // localStorage for a cheap synchronous read.
+  function cachedVersion() {
+    try { return localStorage.getItem("ota_version"); } catch (e) { return null; }
   }
-  window.addEventListener("resize", resize);
-  window.addEventListener("orientationchange", resize);
-  resize();
 
-  // --- iOS Safari / WebView gesture hardening ---
-  // touch-action:none + preventDefault on touch events blocks most gestures,
-  // but iOS pinch-zoom fires gesture* events and double-tap-zoom needs its own
-  // guard, so suppress those explicitly.
+  function saveGame(version, html) {
+    try { localStorage.setItem("ota_version", version); } catch (e) {}
+    if (window.caches) {
+      return caches.open(CACHE_NAME).then(function (cache) {
+        return cache.put("game.html", new Response(html, { headers: { "Content-Type": "text/html" } }));
+      }).catch(function () {
+        // Cache write failed — fall back to localStorage.
+        try { localStorage.setItem("ota_game_html", html); } catch (e) {}
+      });
+    }
+    try { localStorage.setItem("ota_game_html", html); } catch (e) {}
+    return Promise.resolve();
+  }
+
+  function loadCachedGame() {
+    if (window.caches) {
+      return caches.open(CACHE_NAME).then(function (cache) {
+        return cache.match("game.html");
+      }).then(function (res) {
+        if (res) return res.text();
+        try { return localStorage.getItem("ota_game_html"); } catch (e) { return null; }
+      }).catch(function () {
+        try { return localStorage.getItem("ota_game_html"); } catch (e) { return null; }
+      });
+    }
+    try { return Promise.resolve(localStorage.getItem("ota_game_html")); } catch (e) { return Promise.resolve(null); }
+  }
+
+  // ===== Networking ============================================================
+  function fetchJSON(url, timeoutMs) {
+    var ctrl = new AbortController();
+    var timer = setTimeout(function () { ctrl.abort(); }, timeoutMs);
+    return fetch(url, { cache: "no-store", signal: ctrl.signal })
+      .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+      .finally(function () { clearTimeout(timer); });
+  }
+
+  // Download text with a byte-accurate progress bar when Content-Length is
+  // known; otherwise report indeterminate progress.
+  function fetchTextWithProgress(url, onProgress) {
+    return fetch(url, { cache: "no-store" }).then(function (res) {
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      var len = +(res.headers.get("Content-Length") || 0);
+      if (!res.body || !len || !res.body.getReader) {
+        onProgress(null);
+        return res.text();
+      }
+      var reader = res.body.getReader();
+      var received = 0;
+      var chunks = [];
+      return (function pump() {
+        return reader.read().then(function (r) {
+          if (r.done) {
+            var all = new Uint8Array(received), pos = 0;
+            for (var i = 0; i < chunks.length; i++) { all.set(chunks[i], pos); pos += chunks[i].length; }
+            return new TextDecoder("utf-8").decode(all);
+          }
+          chunks.push(r.value);
+          received += r.value.length;
+          onProgress(received / len);
+          return pump();
+        });
+      })();
+    });
+  }
+
+  // ===== Version comparison ("1.0.10" > "1.0.9") ==============================
+  function compareVersions(a, b) {
+    var pa = String(a).split("."), pb = String(b).split(".");
+    var n = Math.max(pa.length, pb.length);
+    for (var i = 0; i < n; i++) {
+      var x = parseInt(pa[i] || "0", 10) || 0;
+      var y = parseInt(pb[i] || "0", 10) || 0;
+      if (x > y) return 1;
+      if (x < y) return -1;
+    }
+    return 0;
+  }
+
+  // ===== Booting the game ======================================================
+  var booted = false;
+  function hideOverlaySoon() {
+    var wait = Math.max(0, MIN_OVERLAY_MS - (Date.now() - startedAt));
+    setTimeout(function () {
+      overlay.classList.add("hidden");
+      setTimeout(function () { if (overlay.parentNode) overlay.parentNode.removeChild(overlay); }, 400);
+    }, wait);
+  }
+
+  function mountIframe(src, isBlob) {
+    var iframe = document.createElement("iframe");
+    iframe.id = "gameframe";
+    iframe.setAttribute("allow", "fullscreen");
+    iframe.onload = function () { hideOverlaySoon(); };
+    iframe.src = src;
+    document.body.insertBefore(iframe, overlay);
+  }
+
+  function bootHtml(html) {
+    if (booted) return;
+    booted = true;
+    // Blob URL keeps the cached game a same-origin document (secure context),
+    // so its own Cache/touch/canvas APIs behave exactly as when served directly.
+    var blob = new Blob([html], { type: "text/html" });
+    mountIframe(URL.createObjectURL(blob), true);
+  }
+
+  function bootBundled() {
+    if (booted) return;
+    booted = true;
+    // The fallback copy packaged in the APK, loaded same-origin from the shell.
+    mountIframe("game.html?ts=" + Date.now(), false);
+  }
+
+  // ===== Orchestration =========================================================
+  function start() {
+    setStatus("Checking for updates…");
+    setProgress(null);
+
+    var remotePromise = fetchJSON(OTA_BASE + "version.json?t=" + Date.now(), VERSION_TIMEOUT_MS)
+      .catch(function () { return null; }); // offline / not-yet-hosted -> null
+
+    Promise.all([remotePromise, loadCachedGame()]).then(function (arr) {
+      var remote = arr[0];
+      var cachedHtml = arr[1];
+      var localVer = cachedHtml ? (cachedVersion() || BUNDLED_VERSION) : BUNDLED_VERSION;
+
+      setVersionLine("v" + localVer + (remote && remote.version ? "  →  latest v" + remote.version : "  ·  offline"));
+
+      var needUpdate = remote && remote.version &&
+        (!cachedHtml ? compareVersions(remote.version, BUNDLED_VERSION) > 0
+                     : compareVersions(remote.version, localVer) > 0);
+
+      if (needUpdate) {
+        setStatus("Downloading new update data… Please wait.");
+        setProgress(0);
+        var gameUrl = OTA_BASE + (remote.game || "game.html") + "?v=" + remote.version + "&t=" + Date.now();
+        fetchTextWithProgress(gameUrl, function (frac) { setProgress(frac); })
+          .then(function (html) {
+            setStatus("Finishing up…");
+            return saveGame(remote.version, html).then(function () {
+              setVersionLine("v" + remote.version + "  ·  updated");
+              bootHtml(html);
+            });
+          })
+          .catch(function () {
+            // Download failed mid-way — fall back to whatever we already have.
+            setStatus("Update failed, starting cached version…");
+            if (cachedHtml) bootHtml(cachedHtml); else bootBundled();
+          });
+        return;
+      }
+
+      // Up to date, offline, or nothing newer than the bundled build.
+      setStatus(cachedHtml ? "Starting…" : "Starting…");
+      setProgress(1);
+      if (cachedHtml) bootHtml(cachedHtml); else bootBundled();
+    }).catch(function () {
+      // Absolute last resort — never leave the user stuck on the overlay.
+      setStatus("Starting…");
+      bootBundled();
+    });
+  }
+
+  // Kick off once the DOM is ready.
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", start);
+  } else {
+    start();
+  }
+
+  // iOS Safari / WebView: block pinch + double-tap zoom on the shell too.
   ["gesturestart", "gesturechange", "gestureend"].forEach(function (evt) {
     document.addEventListener(evt, function (e) { e.preventDefault(); }, { passive: false });
   });
   document.addEventListener("dblclick", function (e) { e.preventDefault(); }, { passive: false });
-  // Double-tap zoom guard: swallow a 2nd tap that lands within 300ms of the last.
-  var lastTouchEndTime = 0;
-  document.addEventListener("touchend", function (e) {
-    var now = Date.now();
-    if (now - lastTouchEndTime <= 300) e.preventDefault();
-    lastTouchEndTime = now;
-  }, { passive: false });
-
-  // ======================================================================
-  // 2. WORLD / CONFIG CONSTANTS
-  // ======================================================================
-  // Bigger world for more room to roam (was 3000x3000).
-  var WORLD = { w: 6000, h: 6000 };
-  var GRID_SIZE = 100;
-
-  var PLAYER_BASE = {
-    radius: 22,
-    maxHp: 100,
-    accel: 900,      // px/s^2 - how fast the tank speeds up
-    friction: 6,      // higher = stops quicker when joystick released
-    maxSpeed: 260,
-    fireCooldown: 0.22,
-    bulletDamage: 12,
-    bulletSpeed: 620,
-    bulletRadius: 7,
-    bulletLife: 0.9,
-    contactDamage: 10, // ram damage the PLAYER takes per collision tick
-    bodyDamage: 20,    // ram damage the player DEALS to a shape per collision tick
-    hitCooldown: 0.5   // per-collision tick: both invuln window AND ram-damage cadence
-  };
-
-  // --- Skill-point upgrade system ---
-  // Each stat can be leveled up to MAX_TIER times by spending skill points,
-  // which are earned one-per-level-up. The 6 defs below drive both the touch
-  // upgrade menu and the effective-stat math in recomputeStats().
-  var MAX_TIER = 8;
-  var UPGRADES = [
-    { key: "speed",  label: "Speed",    color: "#4caf50" },
-    { key: "reload", label: "Reload",   color: "#f2c14e" },
-    { key: "damage", label: "Damage",   color: "#e05353" },
-    { key: "health", label: "Health",   color: "#4d8fe0" },
-    { key: "body",   label: "Body Dmg", color: "#e0873a" }, // ram damage dealt to shapes
-    { key: "shield", label: "Shield",   color: "#3ac6c6" }  // reduces ram damage taken
-  ];
-
-  // --- Health regeneration ---
-  var REGEN_DELAY = 4;    // seconds without taking damage before regen kicks in
-  var REGEN_FRAC = 0.10;  // fraction of maxHp healed per second while regenerating
-
-  // Base shape XP is multiplied by this at grant time (single knob for tuning
-  // farm speed without touching the per-shape numbers below).
-  var XP_MULTIPLIER = 4;
-
-  // Shapes are tankier now (hp roughly doubled) to balance the faster XP farm,
-  // with XP bumped to keep kills rewarding despite the extra effort.
-  var SHAPE_TYPES = {
-    triangle: { sides: 3, hp: 32,  xp: 16, radius: 16, color: "#e05353", rot: 1.6 },
-    square:   { sides: 4, hp: 90,  xp: 34, radius: 20, color: "#e0c740", rot: 0.9 },
-    pentagon: { sides: 5, hp: 260, xp: 95, radius: 30, color: "#4d8fe0", rot: 0.5 }
-  };
-  // Far more shapes on the (now larger) map, and a much faster top-up so the
-  // world stays dense and action-packed.
-  var MAX_SHAPES = 260;
-  var SHAPE_RESPAWN_INTERVAL = 0.25; // seconds between respawn batches while under cap
-  var SHAPE_RESPAWN_BATCH = 4;       // shapes added per respawn batch
-
-  var CAMERA_SMOOTH = 4.5; // higher = snappier follow, lower = laggier/smoother
-
-  // --- Deep class evolution tree (diep.io style) ---
-  // The player evolves at each level in EVOLVE_LEVELS: L15 picks a base (Tier 2)
-  // class, L30 and L45 pick from that class's `upgrades` (Tier 3, then Tier 4).
-  //
-  // Classes are DATA-DRIVEN. Firing and barrel rendering both read the `barrels`
-  // array, so adding a class is just data — no new code paths:
-  //   barrels: [ { a, off, len, w }, ... ]   // one bullet drawn+fired per entry
-  //     a   = angle offset from the turret aim (radians); 0 = straight forward
-  //     off = lateral offset in px (for side-by-side barrels like Twin)
-  //     len = barrel length multiplier (x the base radius+18)
-  //     w   = barrel width multiplier (x the base 14px)
-  // Omitted multiplier fields default to 1 (see fireBullet/recomputeStats):
-  //   reloadMult damageMult speedMult inaccuracy bulletRadiusMult bulletLifeMult
-  //   moveSpeedMult bodyMult hpMult bodyRadiusMult
-  // Rammer classes set rammer:true (+ spikes, knockbackResist) and usually omit
-  // `barrels` (no main gun). `auto:true` adds an independent auto-aim top turret.
-  var EVOLVE_LEVELS = [15, 30, 45];
-  var PI = Math.PI;
-  var DEFAULT_BARRELS = [{ a: 0, off: 0, len: 1, w: 1 }]; // Tier 1 (no class chosen yet)
-
-  var CLASSES = {
-    // ---- Tier 2 (Level 15) ----
-    twin: {
-      label: "Twin", color: "#4caf50", desc: "Two parallel barrels",
-      barrels: [{ a: 0, off: 10, len: 1, w: 0.85 }, { a: 0, off: -10, len: 1, w: 0.85 }],
-      upgrades: ["tripleshot", "twinflank"]
-    },
-    sniper: {
-      label: "Sniper", color: "#e05353", desc: "Long barrel: faster, stronger shots, slow reload",
-      barrels: [{ a: 0, off: 0, len: 1.7, w: 0.7 }],
-      reloadMult: 1.7, damageMult: 1.9, speedMult: 1.6,
-      upgrades: ["assassin", "hunter"]
-    },
-    machinegun: {
-      label: "Machine Gun", color: "#f2c14e", desc: "Wide barrel: fast reload, less accurate",
-      barrels: [{ a: 0, off: 0, len: 0.8, w: 1.6 }],
-      reloadMult: 0.5, damageMult: 0.8, inaccuracy: 0.22,
-      upgrades: ["gunner", "destroyer"]
-    },
-    flank: {
-      label: "Flank Guard", color: "#4d8fe0", desc: "Fires front and back",
-      barrels: [{ a: 0, off: 0, len: 1, w: 1 }, { a: PI, off: 0, len: 1, w: 1 }],
-      upgrades: ["triangle", "quad"]
-    },
-    smasher: {
-      label: "Smasher", color: "#b06fd6", desc: "Pure rammer: no gun, huge body damage, tanky, fast",
-      rammer: true, spikes: 6,
-      bodyMult: 2.6, hpMult: 1.7, moveSpeedMult: 1.28, bodyRadiusMult: 1.35,
-      upgrades: ["auto_smasher", "spike"]
-    },
-
-    // ---- Tier 3 (Level 30) ----
-    tripleshot: {
-      label: "Triple Shot", color: "#4caf50", desc: "Three-way forward spread",
-      barrels: [{ a: -0.22, len: 1, w: 0.85 }, { a: 0, len: 1, w: 0.85 }, { a: 0.22, len: 1, w: 0.85 }],
-      upgrades: ["pentashot"]
-    },
-    twinflank: {
-      label: "Twin Flank", color: "#4caf50", desc: "Twin barrels front AND back",
-      barrels: [{ a: 0, off: 10, w: 0.85 }, { a: 0, off: -10, w: 0.85 },
-                { a: PI, off: 10, w: 0.85 }, { a: PI, off: -10, w: 0.85 }],
-      upgrades: ["octo"]
-    },
-    assassin: {
-      label: "Assassin", color: "#e05353", desc: "Even longer range and power",
-      barrels: [{ a: 0, len: 2.0, w: 0.65 }],
-      reloadMult: 2.0, damageMult: 2.3, speedMult: 1.9,
-      upgrades: ["ranger"]
-    },
-    hunter: {
-      label: "Hunter", color: "#e05353", desc: "Twin stacked sniper barrels",
-      barrels: [{ a: 0, len: 1.9, w: 0.55 }, { a: 0, len: 1.5, w: 0.95 }],
-      reloadMult: 1.6, damageMult: 1.6, speedMult: 1.5,
-      upgrades: ["predator"]
-    },
-    gunner: {
-      label: "Gunner", color: "#f2c14e", desc: "Four small rapid barrels",
-      barrels: [{ a: 0, off: 6, len: 0.7, w: 0.5 }, { a: 0, off: -6, len: 0.7, w: 0.5 },
-                { a: 0, off: 14, len: 0.55, w: 0.5 }, { a: 0, off: -14, len: 0.55, w: 0.5 }],
-      reloadMult: 0.4, damageMult: 0.6, inaccuracy: 0.06,
-      upgrades: ["streamliner"]
-    },
-    destroyer: {
-      label: "Destroyer", color: "#f2c14e", desc: "One huge slow devastating shell",
-      barrels: [{ a: 0, len: 1.1, w: 2.2 }],
-      reloadMult: 3.2, damageMult: 3.2, speedMult: 0.8, bulletRadiusMult: 2.6, bulletLifeMult: 1.3,
-      upgrades: ["annihilator"]
-    },
-    triangle: {
-      label: "Tri-Angle", color: "#4d8fe0", desc: "One front, two angled rear barrels",
-      barrels: [{ a: 0, len: 1, w: 1 }, { a: PI * 0.82, len: 0.9, w: 0.9 }, { a: -PI * 0.82, len: 0.9, w: 0.9 }],
-      upgrades: ["booster"]
-    },
-    quad: {
-      label: "Quad Tank", color: "#4d8fe0", desc: "Barrels in all four directions",
-      barrels: [{ a: 0 }, { a: PI / 2 }, { a: PI }, { a: -PI / 2 }],
-      upgrades: ["octotank"]
-    },
-    auto_smasher: {
-      label: "Auto-Smasher", color: "#b06fd6", desc: "Rammer with an automatic top turret",
-      rammer: true, spikes: 6, auto: true,
-      bodyMult: 2.6, hpMult: 1.7, moveSpeedMult: 1.28, bodyRadiusMult: 1.4,
-      upgrades: ["auto_spike"]
-    },
-    spike: {
-      label: "Spike", color: "#b06fd6", desc: "Extra spikes: massive body damage, knockback-resistant",
-      rammer: true, spikes: 10, knockbackResist: 0.6,
-      bodyMult: 3.6, hpMult: 1.9, moveSpeedMult: 1.2, bodyRadiusMult: 1.45,
-      upgrades: ["mega_spike"]
-    },
-
-    // ---- Tier 4 (Level 45) ----
-    pentashot: {
-      label: "Penta Shot", color: "#4caf50", desc: "Five-way forward spread",
-      barrels: [{ a: -0.34, w: 0.8 }, { a: -0.17, w: 0.8 }, { a: 0, w: 0.8 }, { a: 0.17, w: 0.8 }, { a: 0.34, w: 0.8 }],
-      upgrades: []
-    },
-    octo: {
-      label: "Octo Flank", color: "#4caf50", desc: "Eight barrels, all directions",
-      barrels: [{ a: 0 }, { a: PI / 4 }, { a: PI / 2 }, { a: 3 * PI / 4 },
-                { a: PI }, { a: -3 * PI / 4 }, { a: -PI / 2 }, { a: -PI / 4 }].map(function (b) { b.w = 0.9; return b; }),
-      upgrades: []
-    },
-    ranger: {
-      label: "Ranger", color: "#e05353", desc: "Extreme range and damage",
-      barrels: [{ a: 0, len: 2.4, w: 0.6 }],
-      reloadMult: 2.4, damageMult: 2.8, speedMult: 2.2,
-      upgrades: []
-    },
-    predator: {
-      label: "Predator", color: "#e05353", desc: "Triple stacked sniper barrels",
-      barrels: [{ a: 0, len: 2.0, w: 0.5 }, { a: 0, len: 1.6, w: 0.8 }, { a: 0, len: 1.2, w: 1.1 }],
-      reloadMult: 1.8, damageMult: 1.9, speedMult: 1.6,
-      upgrades: []
-    },
-    streamliner: {
-      label: "Streamliner", color: "#f2c14e", desc: "Rapid stacked stream of bullets",
-      barrels: [{ a: 0, len: 1.5, w: 0.5 }, { a: 0, len: 1.3, w: 0.5 }, { a: 0, len: 1.1, w: 0.5 },
-                { a: 0, len: 0.9, w: 0.5 }, { a: 0, len: 0.7, w: 0.5 }],
-      reloadMult: 0.3, damageMult: 0.5, inaccuracy: 0.05,
-      upgrades: []
-    },
-    annihilator: {
-      label: "Annihilator", color: "#f2c14e", desc: "One colossal cannon",
-      barrels: [{ a: 0, len: 1.2, w: 2.8 }],
-      reloadMult: 3.6, damageMult: 4.5, speedMult: 0.75, bulletRadiusMult: 3.4, bulletLifeMult: 1.4,
-      upgrades: []
-    },
-    booster: {
-      label: "Booster", color: "#4d8fe0", desc: "Front barrel plus four rear thrusters",
-      barrels: [{ a: 0, len: 1, w: 1 }, { a: PI * 0.82, len: 1, w: 0.9 }, { a: -PI * 0.82, len: 1, w: 0.9 },
-                { a: PI, off: 6, len: 0.9, w: 0.8 }, { a: PI, off: -6, len: 0.9, w: 0.8 }],
-      upgrades: []
-    },
-    octotank: {
-      label: "Octo Tank", color: "#4d8fe0", desc: "Eight-way barrage",
-      barrels: [{ a: 0 }, { a: PI / 4 }, { a: PI / 2 }, { a: 3 * PI / 4 },
-                { a: PI }, { a: -3 * PI / 4 }, { a: -PI / 2 }, { a: -PI / 4 }],
-      upgrades: []
-    },
-    auto_spike: {
-      label: "Auto-Spike", color: "#b06fd6", desc: "Spiked rammer with an auto turret",
-      rammer: true, spikes: 10, auto: true, knockbackResist: 0.6,
-      bodyMult: 3.6, hpMult: 1.9, moveSpeedMult: 1.22, bodyRadiusMult: 1.5,
-      upgrades: []
-    },
-    mega_spike: {
-      label: "Mega-Spike", color: "#b06fd6", desc: "Enormous spikes, near-immovable, brutal ram",
-      rammer: true, spikes: 12, knockbackResist: 0.8,
-      bodyMult: 5.0, hpMult: 2.2, moveSpeedMult: 1.15, bodyRadiusMult: 1.6,
-      upgrades: []
-    }
-  };
-  var CLASS_ORDER = ["twin", "sniper", "machinegun", "flank", "smasher"]; // Tier 2 base classes offered at L15
-
-  // ======================================================================
-  // 3. INPUT: DUAL VIRTUAL JOYSTICKS + DESKTOP FALLBACK
-  //    Touch handling uses raw Touch events (not Pointer events) tracked by
-  //    identifier so both joysticks can be dragged simultaneously - this is
-  //    the part Pointer/mouse emulation on some mobile browsers gets wrong
-  //    when two fingers are down at once.
-  // ======================================================================
-  function makeStick(deadzone) {
-    return {
-      active: false,
-      touchId: null,
-      originX: 0, originY: 0,   // where the thumb first touched (floating base)
-      knobX: 0, knobY: 0,       // current knob screen position
-      dx: 0, dy: 0,             // normalized -1..1 output
-      mag: 0,                   // 0..1 magnitude
-      deadzone: deadzone,
-      maxRadius: 55
-    };
-  }
-  var moveStick = makeStick(0.15);
-  var aimStick = makeStick(0.2);
-
-  function updateStickFromPoint(stick, x, y) {
-    var dx = x - stick.originX;
-    var dy = y - stick.originY;
-    var dist = Math.sqrt(dx * dx + dy * dy);
-    var clamped = Math.min(dist, stick.maxRadius);
-    var angle = Math.atan2(dy, dx);
-    stick.knobX = stick.originX + Math.cos(angle) * clamped;
-    stick.knobY = stick.originY + Math.sin(angle) * clamped;
-    var norm = clamped / stick.maxRadius; // 0..1
-    if (norm < stick.deadzone) {
-      stick.dx = 0; stick.dy = 0; stick.mag = 0;
-    } else {
-      stick.dx = Math.cos(angle);
-      stick.dy = Math.sin(angle);
-      stick.mag = norm;
-    }
-  }
-
-  function resetStick(stick) {
-    stick.active = false;
-    stick.touchId = null;
-    stick.dx = 0; stick.dy = 0; stick.mag = 0;
-  }
-
-  function beginStick(stick, x, y) {
-    stick.active = true;
-    stick.originX = x;
-    stick.originY = y;
-    stick.knobX = x;
-    stick.knobY = y;
-    stick.dx = 0; stick.dy = 0; stick.mag = 0;
-  }
-
-  // --- Status button (upgrade menu toggle) + evolution overlay hit-testing ---
-  // All three hit-test helpers below reference getExpandedUpgradeButtons(),
-  // getStatusButtonRect(), and getEvolutionCards(), which are hoisted function
-  // declarations defined later in the rendering section — safe to call here.
-  var statusMenuOpen = false;
-
-  // Per the spec, the menu can only be opened while points are available; if
-  // points run out (or never existed) a tap on Status is a no-op.
-  function toggleStatusMenu() {
-    if (player.skillPoints <= 0) { statusMenuOpen = false; return; }
-    statusMenuOpen = !statusMenuOpen;
-  }
-
-  function hitStatusButton(x, y) {
-    var r = getStatusButtonRect();
-    return x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h;
-  }
-
-  function hitUpgradeButton(x, y) {
-    var rects = getExpandedUpgradeButtons();
-    for (var i = 0; i < rects.length; i++) {
-      var r = rects[i];
-      if (x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h) {
-        return r.def.key;
-      }
-    }
-    return null;
-  }
-
-  function hitEvolutionCard(x, y) {
-    var cards = getEvolutionCards();
-    for (var i = 0; i < cards.length; i++) {
-      var c = cards[i];
-      if (x >= c.x && x <= c.x + c.w && y >= c.y && y <= c.y + c.h) return c.key;
-    }
-    return null;
-  }
-
-  // Shared tap-routing logic used by both touch and mouse input. Returns true
-  // if the tap was consumed by UI (evolution overlay / status button / an
-  // expanded upgrade button) so the caller skips joystick/fire handling.
-  function handleUiTap(x, y) {
-    if (player.evolutionPending) {
-      // The overlay blocks everything underneath it while a choice is
-      // pending, even taps that miss the 4 cards.
-      var classKey = hitEvolutionCard(x, y);
-      if (classKey) chooseClass(classKey);
-      return true;
-    }
-    if (hitStatusButton(x, y)) {
-      toggleStatusMenu();
-      return true;
-    }
-    if (statusMenuOpen && player.skillPoints > 0) {
-      var upKey = hitUpgradeButton(x, y);
-      if (upKey) {
-        applyUpgrade(upKey);
-        return true;
-      }
-    }
-    return false;
-  }
-
-  canvas.addEventListener("touchstart", function (e) {
-    e.preventDefault();
-    var touches = e.changedTouches;
-    for (var i = 0; i < touches.length; i++) {
-      var t = touches[i];
-      // UI is hit-tested FIRST so a tap on it is consumed and not
-      // misinterpreted as the start of a joystick drag.
-      if (handleUiTap(t.clientX, t.clientY)) continue;
-      // Left half of screen = movement stick, right half = aim/fire stick.
-      var isLeft = t.clientX < view.w / 2;
-      if (isLeft && !moveStick.active) {
-        moveStick.touchId = t.identifier;
-        beginStick(moveStick, t.clientX, t.clientY);
-      } else if (!isLeft && !aimStick.active) {
-        aimStick.touchId = t.identifier;
-        beginStick(aimStick, t.clientX, t.clientY);
-      }
-    }
-  }, { passive: false });
-
-  canvas.addEventListener("touchmove", function (e) {
-    e.preventDefault();
-    var touches = e.changedTouches;
-    for (var i = 0; i < touches.length; i++) {
-      var t = touches[i];
-      if (moveStick.active && t.identifier === moveStick.touchId) {
-        updateStickFromPoint(moveStick, t.clientX, t.clientY);
-      } else if (aimStick.active && t.identifier === aimStick.touchId) {
-        updateStickFromPoint(aimStick, t.clientX, t.clientY);
-      }
-    }
-  }, { passive: false });
-
-  function handleTouchEnd(e) {
-    e.preventDefault();
-    var touches = e.changedTouches;
-    for (var i = 0; i < touches.length; i++) {
-      var t = touches[i];
-      if (moveStick.active && t.identifier === moveStick.touchId) resetStick(moveStick);
-      if (aimStick.active && t.identifier === aimStick.touchId) resetStick(aimStick);
-    }
-  }
-  canvas.addEventListener("touchend", handleTouchEnd, { passive: false });
-  canvas.addEventListener("touchcancel", handleTouchEnd, { passive: false });
-
-  // --- Desktop fallback: WASD to move, mouse to aim, mouse-down to fire ---
-  var keys = {};
-  window.addEventListener("keydown", function (e) { keys[e.key.toLowerCase()] = true; });
-  window.addEventListener("keyup", function (e) { keys[e.key.toLowerCase()] = false; });
-
-  var mouse = { x: 0, y: 0, down: false };
-  canvas.addEventListener("mousemove", function (e) {
-    mouse.x = e.clientX; mouse.y = e.clientY;
-  });
-  canvas.addEventListener("mousedown", function (e) {
-    // Check UI first so clicking it upgrades/chooses/toggles instead of firing.
-    if (handleUiTap(e.clientX, e.clientY)) return;
-    mouse.down = true;
-  });
-  window.addEventListener("mouseup", function (e) { mouse.down = false; });
-
-  // ======================================================================
-  // 4. ENTITY FACTORIES
-  // ======================================================================
-  function randRange(a, b) { return a + Math.random() * (b - a); }
-
-  function makePlayer() {
-    return {
-      x: WORLD.w / 2,
-      y: WORLD.h / 2,
-      vx: 0, vy: 0,
-      radius: PLAYER_BASE.radius,
-      hp: PLAYER_BASE.maxHp,
-      maxHp: PLAYER_BASE.maxHp,
-      turretAngle: 0,
-      fireTimer: 0,
-      hitTimer: 0,
-      regenTimer: 0,          // seconds since last damage taken
-      bodySpin: 0,            // decorative rotation for the Smasher spike ring
-      autoAngle: 0,           // auto-turret aim (Auto-Smasher line)
-      autoFireTimer: 0,       // auto-turret reload countdown
-      level: 1,
-      xp: 0,
-      xpToNext: 100,
-      skillPoints: 0,
-      stats: { speed: 0, reload: 0, damage: 0, health: 0, body: 0, shield: 0 }, // tiers spent per stat
-      tankClass: null,        // current class key (see CLASSES); null before first evolution
-      classTier: 0,           // 0 = none, 1 = Tier2 (L15), 2 = Tier3 (L30), 3 = Tier4 (L45)
-      evolutionPending: false, // true while the class-choice overlay should be shown
-      // Effective stats, seeded to tier-0 base so update code needs no branching.
-      // recomputeStats() rewrites these whenever an upgrade or class is chosen.
-      moveAccel: PLAYER_BASE.accel,
-      moveMaxSpeed: PLAYER_BASE.maxSpeed,
-      fireCooldownEff: PLAYER_BASE.fireCooldown,
-      bulletDamageEff: PLAYER_BASE.bulletDamage,
-      bodyDamageEff: PLAYER_BASE.bodyDamage, // ram damage dealt to shapes
-      damageTakenMult: 1                     // <1 once Shield is upgraded
-    };
-  }
-  var player = makePlayer();
-
-  // Translate the player's spent stat tiers (and chosen class) into concrete
-  // effective values. Fully recomputes from base every call, so it's safe to
-  // call after any upgrade purchase OR class choice. Read per-frame by the
-  // update loop, which needs no class/tier branching of its own.
-  function recomputeStats(p) {
-    var s = p.stats;
-    var cls = p.tankClass ? CLASSES[p.tankClass] : null;
-    var moveMul = cls && cls.moveSpeedMult ? cls.moveSpeedMult : 1;
-    var bodyMul = cls && cls.bodyMult ? cls.bodyMult : 1;
-    var hpMul = cls && cls.hpMult ? cls.hpMult : 1;
-    var radiusMul = cls && cls.bodyRadiusMult ? cls.bodyRadiusMult : 1;
-
-    p.moveAccel = PLAYER_BASE.accel * (1 + 0.08 * s.speed) * moveMul;
-    p.moveMaxSpeed = PLAYER_BASE.maxSpeed * (1 + 0.08 * s.speed) * moveMul;
-    // Division (not subtraction) keeps the cooldown strictly positive — a
-    // subtractive formula could reach zero/negative at high tiers.
-    p.fireCooldownEff = PLAYER_BASE.fireCooldown / (1 + 0.12 * s.reload);
-    p.bulletDamageEff = PLAYER_BASE.bulletDamage * (1 + 0.15 * s.damage);
-    // Body (ram) damage: stat tiers stack multiplicatively with the class buff.
-    p.bodyDamageEff = PLAYER_BASE.bodyDamage * (1 + 0.25 * s.body) * bodyMul;
-    // Shield: fraction of incoming ram damage actually taken (<1 = tankier).
-    // Division keeps it in (0,1], approaching but never reaching 0.
-    p.damageTakenMult = 1 / (1 + 0.15 * s.shield);
-    // Rammer classes (Smasher) get a bigger body — larger ram hitbox + visual.
-    p.radius = PLAYER_BASE.radius * radiusMul;
-    // Health: base * health-tier * class hp multiplier. Add the gained
-    // headroom to current hp so buying Health/evolving heals immediately.
-    var newMax = Math.round(PLAYER_BASE.maxHp * (1 + 0.15 * s.health) * hpMul);
-    var delta = newMax - p.maxHp;
-    p.maxHp = newMax;
-    if (delta > 0) p.hp = Math.min(newMax, p.hp + delta);
-    if (p.hp > p.maxHp) p.hp = p.maxHp;
-  }
-
-  // Spend one skill point on the given stat if affordable and not maxed.
-  function applyUpgrade(key) {
-    if (player.skillPoints <= 0) return;
-    if (player.stats[key] >= MAX_TIER) return;
-    player.skillPoints--;
-    player.stats[key]++;
-    recomputeStats(player);
-    // The upgrade menu should only ever be open while points are available
-    // (see toggleStatusMenu) — collapse it the moment the last point is spent.
-    if (player.skillPoints <= 0) statusMenuOpen = false;
-  }
-
-  // The class keys currently offerable to the player: the base list before any
-  // class is chosen, otherwise the current class's `upgrades` (next tier).
-  function evolutionOptions() {
-    return player.tankClass ? (CLASSES[player.tankClass].upgrades || []) : CLASS_ORDER;
-  }
-
-  // Chooses the next class in the tree at an evolution prompt. Advances the
-  // tier so the next threshold offers the following branch.
-  function chooseClass(key) {
-    if (!player.evolutionPending) return;
-    if (evolutionOptions().indexOf(key) < 0) return;
-    player.tankClass = key;
-    player.classTier += 1;
-    player.evolutionPending = false;
-    recomputeStats(player); // apply the class's passive stat buffs right away
-  }
-
-  function spawnShape() {
-    var keys = Object.keys(SHAPE_TYPES);
-    var typeKey = keys[Math.floor(Math.random() * keys.length)];
-    var def = SHAPE_TYPES[typeKey];
-    return {
-      type: typeKey,
-      x: randRange(def.radius, WORLD.w - def.radius),
-      y: randRange(def.radius, WORLD.h - def.radius),
-      radius: def.radius,
-      hp: def.hp,
-      maxHp: def.hp,
-      rotation: randRange(0, Math.PI * 2),
-      rotSpeed: def.rot * (Math.random() < 0.5 ? 1 : -1)
-    };
-  }
-
-  var shapes = [];
-  for (var i = 0; i < MAX_SHAPES; i++) shapes.push(spawnShape());
-  var shapeRespawnTimer = 0;
-
-  var bullets = []; // pooled-by-reuse array of {x,y,vx,vy,life}
-
-  // Spawns one bullet at the given world angle, offset laterally (perpendicular
-  // to that angle) by lateralOffset. radius/life default to the base bullet.
-  function spawnBullet(angle, lateralOffset, speed, dmg, radius, life) {
-    var ox = -Math.sin(angle) * lateralOffset;
-    var oy = Math.cos(angle) * lateralOffset;
-    var tipX = player.x + Math.cos(angle) * (player.radius + 10) + ox;
-    var tipY = player.y + Math.sin(angle) * (player.radius + 10) + oy;
-    bullets.push({
-      x: tipX,
-      y: tipY,
-      vx: Math.cos(angle) * speed,
-      vy: Math.sin(angle) * speed,
-      life: life || PLAYER_BASE.bulletLife,
-      radius: radius || PLAYER_BASE.bulletRadius,
-      dmg: dmg
-    });
-  }
-
-  // Fires the main gun: one bullet per barrel in the current class's `barrels`
-  // array (or the single default barrel with no class). Rammer classes have no
-  // `barrels` and thus no main gun.
-  function fireBullet() {
-    var cls = player.tankClass ? CLASSES[player.tankClass] : null;
-    var barrels = cls ? cls.barrels : DEFAULT_BARRELS;
-    if (!barrels) return; // gunless rammer classes (Smasher / Spike)
-
-    var speed = PLAYER_BASE.bulletSpeed * (cls && cls.speedMult ? cls.speedMult : 1);
-    var dmg = player.bulletDamageEff * (cls && cls.damageMult ? cls.damageMult : 1);
-    var radius = PLAYER_BASE.bulletRadius * (cls && cls.bulletRadiusMult ? cls.bulletRadiusMult : 1);
-    var life = PLAYER_BASE.bulletLife * (cls && cls.bulletLifeMult ? cls.bulletLifeMult : 1);
-    var inacc = cls && cls.inaccuracy ? cls.inaccuracy : 0;
-
-    for (var i = 0; i < barrels.length; i++) {
-      var br = barrels[i];
-      var spread = inacc ? randRange(-inacc, inacc) : 0;
-      spawnBullet(player.turretAngle + (br.a || 0) + spread, br.off || 0, speed, dmg, radius, life);
-    }
-  }
-
-  // The Auto-Smasher line's small independent top turret: weak, fast, and
-  // auto-aimed. Damage scales lightly with the tank's body damage.
-  function spawnAutoBullet(angle) {
-    spawnBullet(angle, 0, PLAYER_BASE.bulletSpeed * 0.9,
-      6 + player.bodyDamageEff * 0.25, PLAYER_BASE.bulletRadius * 0.7, PLAYER_BASE.bulletLife);
-  }
-
-  // Nearest shape within maxDist of (x,y), or null — used by the auto turret.
-  function nearestShape(x, y, maxDist) {
-    var best = null, bd = maxDist * maxDist;
-    for (var i = 0; i < shapes.length; i++) {
-      var s = shapes[i];
-      var dx = s.x - x, dy = s.y - y, d = dx * dx + dy * dy;
-      if (d < bd) { bd = d; best = s; }
-    }
-    return best;
-  }
-
-  // ======================================================================
-  // 5. CAMERA - lerps toward the player each frame instead of snapping,
-  //    which is what gives the "smooth follow" feel requested.
-  // ======================================================================
-  var camera = { x: player.x, y: player.y };
-
-  function updateCamera(dt) {
-    var t = 1 - Math.exp(-CAMERA_SMOOTH * dt); // frame-rate independent lerp factor
-    camera.x += (player.x - camera.x) * t;
-    camera.y += (player.y - camera.y) * t;
-  }
-
-  // ======================================================================
-  // 5b. MULTIPLAYER FOUNDATION (WebSocket client)
-  //   A lightweight, transport-only client scaffold for future online play.
-  //   It is DISABLED by default (NET.url === null) so the game runs fully
-  //   offline in the APK with zero connection attempts / console noise. To go
-  //   live, set window.TANK_NET_URL (or NET.url) to a "wss://..." endpoint
-  //   before load, or call NET.connect(url) at runtime.
-  //
-  //   Wire protocol (JSON text frames), server-authoritative-friendly:
-  //     -> client: {t:"join", name}
-  //     -> client: {t:"state", x,y,angle,cls,hp,maxHp,level}         (~20Hz)
-  //     <- server: {t:"welcome", id}
-  //     <- server: {t:"snapshot", players:[{id,x,y,angle,cls,hp,maxHp,name}],
-  //                                bullets:[{x,y,r}]}
-  //     <- server: {t:"leave", id}
-  //   Remote players/bullets are tracked and rendered; local sim stays
-  //   authoritative for the local tank so single-player is unaffected.
-  // ======================================================================
-  var NET = {
-    url: (typeof window !== "undefined" && window.TANK_NET_URL) || null,
-    ws: null,
-    connected: false,
-    selfId: null,
-    name: "Player",
-    remotePlayers: {},   // id -> { x, y, angle, cls, hp, maxHp, name }
-    remoteBullets: [],   // [ { x, y, r } ]
-    sendTimer: 0,
-    sendInterval: 0.05,  // 20 Hz outbound state
-
-    connect: function (url) {
-      this.url = url || this.url;
-      if (!this.url || typeof WebSocket === "undefined") return;
-      try {
-        var ws = new WebSocket(this.url);
-        this.ws = ws;
-        var self = this;
-        ws.onopen = function () {
-          self.connected = true;
-          self.send({ t: "join", name: self.name });
-        };
-        ws.onmessage = function (ev) { self._onMessage(ev.data); };
-        ws.onclose = function () { self.connected = false; self.remotePlayers = {}; self.remoteBullets = []; };
-        ws.onerror = function () { /* onclose handles state reset */ };
-      } catch (e) { /* stay offline on any failure */ }
-    },
-
-    disconnect: function () {
-      if (this.ws) { try { this.ws.close(); } catch (e) {} }
-      this.ws = null; this.connected = false;
-      this.remotePlayers = {}; this.remoteBullets = [];
-    },
-
-    send: function (obj) {
-      if (this.connected && this.ws) {
-        try { this.ws.send(JSON.stringify(obj)); } catch (e) {}
-      }
-    },
-
-    _onMessage: function (data) {
-      var msg;
-      try { msg = JSON.parse(data); } catch (e) { return; }
-      if (msg.t === "welcome") {
-        this.selfId = msg.id;
-      } else if (msg.t === "snapshot") {
-        var map = {};
-        var list = msg.players || [];
-        for (var i = 0; i < list.length; i++) {
-          var pl = list[i];
-          if (pl.id === this.selfId) continue; // never render our own echo
-          map[pl.id] = pl;
-        }
-        this.remotePlayers = map;
-        this.remoteBullets = msg.bullets || [];
-      } else if (msg.t === "leave") {
-        delete this.remotePlayers[msg.id];
-      }
-    },
-
-    // Push local state at a fixed rate; no-op while offline.
-    update: function (dt) {
-      if (!this.connected) return;
-      this.sendTimer -= dt;
-      if (this.sendTimer <= 0) {
-        this.sendTimer = this.sendInterval;
-        this.send({
-          t: "state",
-          x: Math.round(player.x), y: Math.round(player.y),
-          angle: +player.turretAngle.toFixed(3),
-          cls: player.tankClass, hp: Math.round(player.hp),
-          maxHp: player.maxHp, level: player.level
-        });
-      }
-    }
-  };
-  // Auto-connect only if an endpoint was provided; otherwise stay offline.
-  if (NET.url) NET.connect();
-
-  // ======================================================================
-  // 6. UPDATE LOGIC
-  // ======================================================================
-  function clamp(v, min, max) { return v < min ? min : (v > max ? max : v); }
-
-  function updatePlayer(dt) {
-    // --- movement: combine touch joystick + desktop WASD fallback ---
-    var mx = moveStick.mag > 0 ? moveStick.dx * moveStick.mag : 0;
-    var my = moveStick.mag > 0 ? moveStick.dy * moveStick.mag : 0;
-    if (mx === 0 && my === 0) {
-      var kx = (keys["d"] ? 1 : 0) - (keys["a"] ? 1 : 0);
-      var ky = (keys["s"] ? 1 : 0) - (keys["w"] ? 1 : 0);
-      var klen = Math.sqrt(kx * kx + ky * ky);
-      if (klen > 0) { mx = kx / klen; my = ky / klen; }
-    }
-
-    player.vx += mx * player.moveAccel * dt;
-    player.vy += my * player.moveAccel * dt;
-
-    // Exponential friction/drag (frame-rate independent) so the tank glides
-    // to a stop rather than halting instantly - gives it a "tank" feel.
-    var drag = Math.exp(-PLAYER_BASE.friction * dt);
-    player.vx *= drag;
-    player.vy *= drag;
-
-    var speed = Math.sqrt(player.vx * player.vx + player.vy * player.vy);
-    if (speed > player.moveMaxSpeed) {
-      var scale = player.moveMaxSpeed / speed;
-      player.vx *= scale; player.vy *= scale;
-    }
-
-    player.x = clamp(player.x + player.vx * dt, player.radius, WORLD.w - player.radius);
-    player.y = clamp(player.y + player.vy * dt, player.radius, WORLD.h - player.radius);
-
-    // --- aiming + auto-fire: touch joystick, else mouse ---
-    var aiming = false;
-    if (aimStick.mag > aimStick.deadzone) {
-      player.turretAngle = Math.atan2(aimStick.dy, aimStick.dx);
-      aiming = true;
-    } else if (mouse.down) {
-      var screenPX = player.x - camera.x + view.w / 2;
-      var screenPY = player.y - camera.y + view.h / 2;
-      player.turretAngle = Math.atan2(mouse.y - screenPY, mouse.x - screenPX);
-      aiming = true;
-    }
-
-    var cls = player.tankClass ? CLASSES[player.tankClass] : null;
-    player.fireTimer -= dt;
-    if (aiming && player.fireTimer <= 0) {
-      fireBullet();
-      player.fireTimer = player.fireCooldownEff * (cls && cls.reloadMult ? cls.reloadMult : 1);
-    }
-
-    // Auto-turret (Auto-Smasher line): independently targets and fires at the
-    // nearest shape regardless of the aim joystick; idles by slowly sweeping.
-    player.autoFireTimer -= dt;
-    if (cls && cls.auto) {
-      var target = nearestShape(player.x, player.y, 620);
-      if (target) {
-        player.autoAngle = Math.atan2(target.y - player.y, target.x - player.x);
-        if (player.autoFireTimer <= 0) {
-          spawnAutoBullet(player.autoAngle);
-          player.autoFireTimer = 0.35;
-        }
-      } else {
-        player.autoAngle += dt * 0.7; // idle sweep
-      }
-    }
-
-    if (player.hitTimer > 0) player.hitTimer -= dt;
-    player.bodySpin += dt * 1.5; // slow rotation for the Smasher spike ring
-
-    // Health regeneration: after REGEN_DELAY seconds without taking damage,
-    // slowly heal at a rate proportional to maxHp (so it scales with the
-    // Health upgrade). regenTimer is reset to 0 on damage in checkCollisions().
-    player.regenTimer += dt;
-    if (player.regenTimer >= REGEN_DELAY && player.hp < player.maxHp) {
-      player.hp = Math.min(player.maxHp, player.hp + player.maxHp * REGEN_FRAC * dt);
-    }
-  }
-
-  function updateBullets(dt) {
-    for (var i = bullets.length - 1; i >= 0; i--) {
-      var b = bullets[i];
-      b.x += b.vx * dt;
-      b.y += b.vy * dt;
-      b.life -= dt;
-      if (b.life <= 0 || b.x < 0 || b.x > WORLD.w || b.y < 0 || b.y > WORLD.h) {
-        bullets.splice(i, 1);
-      }
-    }
-  }
-
-  function updateShapes(dt) {
-    for (var i = 0; i < shapes.length; i++) {
-      shapes[i].rotation += shapes[i].rotSpeed * dt;
-    }
-    // Keep the shape count topped up quickly in small batches so the larger
-    // map stays dense without one giant pop-in.
-    shapeRespawnTimer -= dt;
-    if (shapeRespawnTimer <= 0) {
-      shapeRespawnTimer = SHAPE_RESPAWN_INTERVAL;
-      for (var b = 0; b < SHAPE_RESPAWN_BATCH && shapes.length < MAX_SHAPES; b++) {
-        shapes.push(spawnShape());
-      }
-    }
-  }
-
-  function grantXp(amount) {
-    player.xp += amount;
-    while (player.xp >= player.xpToNext) {
-      player.xp -= player.xpToNext;
-      player.level++;
-      player.xpToNext = Math.round(player.xpToNext * 1.35);
-      // Each level grants one skill point to spend on the 6 upgradable stats.
-      // (No passive stat growth — all power comes from player-chosen upgrades.)
-      player.skillPoints++;
-      // Evolution: figure out the highest class tier the current level unlocks
-      // (L15->1, L30->2, L45->3). If the player is behind that tier and their
-      // current class actually has options to evolve into, open the prompt.
-      var targetTier = 0;
-      for (var ei = 0; ei < EVOLVE_LEVELS.length; ei++) {
-        if (player.level >= EVOLVE_LEVELS[ei]) targetTier = ei + 1;
-      }
-      if (targetTier > player.classTier && !player.evolutionPending && evolutionOptions().length > 0) {
-        player.evolutionPending = true;
-      }
-    }
-  }
-
-  // --- Collision detection: flat circle-vs-circle checks. At this entity
-  // count (dozens of shapes/bullets) a spatial grid would be premature
-  // optimization; O(n*m) is cheap enough per frame. ---
-  function checkCollisions() {
-    // Bullets vs shapes
-    for (var bi = bullets.length - 1; bi >= 0; bi--) {
-      var b = bullets[bi];
-      var hit = false;
-      for (var si = 0; si < shapes.length; si++) {
-        var s = shapes[si];
-        var dx = b.x - s.x, dy = b.y - s.y;
-        var distSq = dx * dx + dy * dy;
-        var minDist = b.radius + s.radius;
-        if (distSq < minDist * minDist) {
-          s.hp -= b.dmg;
-          hit = true;
-          if (s.hp <= 0) {
-            grantXp(SHAPE_TYPES[s.type].xp * XP_MULTIPLIER);
-            shapes.splice(si, 1);
-          }
-          break;
-        }
-      }
-      if (hit) bullets.splice(bi, 1);
-    }
-
-    // Player vs shapes: TWO-WAY ram damage (rate-limited) + knockback.
-    // On each collision tick (gated by hitTimer) the player deals Body Damage
-    // to the shape AND takes contact damage (reduced by Shield) from it — the
-    // Rammer mechanic. Ticking on the same timer keeps the exchange fair and
-    // stops a single overlapping frame from instantly deleting the shape.
-    for (var i = 0; i < shapes.length; i++) {
-      var sh = shapes[i];
-      var dx = player.x - sh.x, dy = player.y - sh.y;
-      var dist = Math.sqrt(dx * dx + dy * dy);
-      var minDist = player.radius + sh.radius;
-      if (dist < minDist && dist > 0.0001) {
-        var overlap = minDist - dist;
-        var nx = dx / dist, ny = dy / dist;
-        // Push both apart proportional to overlap - simple elastic separation
-        // rather than a full physics solver. Spike-line classes resist
-        // knockback, so the player holds ground and the shape absorbs the push.
-        var pcls = player.tankClass ? CLASSES[player.tankClass] : null;
-        var kr = pcls && pcls.knockbackResist ? pcls.knockbackResist : 0; // 0..1
-        var pPush = 0.5 * (1 - kr), sPush = 1 - pPush; // still fully separate
-        player.x += nx * overlap * pPush;
-        player.y += ny * overlap * pPush;
-        sh.x -= nx * overlap * sPush;
-        sh.y -= ny * overlap * sPush;
-
-        if (player.hitTimer <= 0) {
-          // Shape takes the player's body damage.
-          sh.hp -= player.bodyDamageEff;
-          // Player takes contact damage, mitigated by the Shield stat.
-          player.hp -= PLAYER_BASE.contactDamage * player.damageTakenMult;
-          player.hitTimer = PLAYER_BASE.hitCooldown;
-          player.regenTimer = 0;   // taking damage restarts the regen delay
-
-          if (sh.hp <= 0) {
-            grantXp(SHAPE_TYPES[sh.type].xp * XP_MULTIPLIER); // ram kills grant XP too
-            shapes.splice(i, 1);
-            i--;
-          }
-          if (player.hp <= 0) { respawnPlayer(); break; }
-        }
-      }
-    }
-
-    player.x = clamp(player.x, player.radius, WORLD.w - player.radius);
-    player.y = clamp(player.y, player.radius, WORLD.h - player.radius);
-  }
-
-  function respawnPlayer() {
-    // Prototype-friendly: no separate game-over screen, just reset in place
-    // so the core loop (drive/aim/shoot) is always immediately testable.
-    Object.assign(player, makePlayer());
-  }
-
-  // ======================================================================
-  // 7. RENDERING
-  // ======================================================================
-  function worldToScreen(x, y) {
-    return { x: x - camera.x + view.w / 2, y: y - camera.y + view.h / 2 };
-  }
-
-  function drawGrid() {
-    ctx.strokeStyle = "rgba(255,255,255,0.06)";
-    ctx.lineWidth = 1;
-    var startX = Math.floor((camera.x - view.w / 2) / GRID_SIZE) * GRID_SIZE;
-    var startY = Math.floor((camera.y - view.h / 2) / GRID_SIZE) * GRID_SIZE;
-    var endX = camera.x + view.w / 2;
-    var endY = camera.y + view.h / 2;
-    ctx.beginPath();
-    for (var x = startX; x < endX; x += GRID_SIZE) {
-      var p = worldToScreen(x, 0);
-      ctx.moveTo(p.x, 0);
-      ctx.lineTo(p.x, view.h);
-    }
-    for (var y = startY; y < endY; y += GRID_SIZE) {
-      var p2 = worldToScreen(0, y);
-      ctx.moveTo(0, p2.y);
-      ctx.lineTo(view.w, p2.y);
-    }
-    ctx.stroke();
-  }
-
-  function drawWorldBounds() {
-    var topLeft = worldToScreen(0, 0);
-    ctx.strokeStyle = "rgba(255,80,80,0.5)";
-    ctx.lineWidth = 4;
-    ctx.strokeRect(topLeft.x, topLeft.y, WORLD.w, WORLD.h);
-  }
-
-  function drawPolygon(cx, cy, radius, sides, rotation, color) {
-    ctx.beginPath();
-    for (var i = 0; i < sides; i++) {
-      var angle = rotation + (i / sides) * Math.PI * 2;
-      var px = cx + Math.cos(angle) * radius;
-      var py = cy + Math.sin(angle) * radius;
-      if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
-    }
-    ctx.closePath();
-    ctx.fillStyle = color;
-    ctx.fill();
-    ctx.lineWidth = 2;
-    ctx.strokeStyle = "rgba(0,0,0,0.35)";
-    ctx.stroke();
-  }
-
-  function drawShapes() {
-    for (var i = 0; i < shapes.length; i++) {
-      var s = shapes[i];
-      var p = worldToScreen(s.x, s.y);
-      if (p.x < -60 || p.x > view.w + 60 || p.y < -60 || p.y > view.h + 60) continue; // cull offscreen
-      var def = SHAPE_TYPES[s.type];
-      drawPolygon(p.x, p.y, s.radius, def.sides, s.rotation, def.color);
-      // HP bar only if damaged, mirrors diep.io behavior
-      if (s.hp < s.maxHp) {
-        var barW = s.radius * 2;
-        var ratio = Math.max(s.hp / s.maxHp, 0);
-        ctx.fillStyle = "rgba(0,0,0,0.4)";
-        ctx.fillRect(p.x - barW / 2, p.y - s.radius - 12, barW, 5);
-        ctx.fillStyle = "#4caf50";
-        ctx.fillRect(p.x - barW / 2, p.y - s.radius - 12, barW * ratio, 5);
-      }
-    }
-  }
-
-  function drawBullets() {
-    ctx.fillStyle = "#f2f2f2";
-    for (var i = 0; i < bullets.length; i++) {
-      var b = bullets[i];
-      var p = worldToScreen(b.x, b.y);
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, b.radius, 0, Math.PI * 2);
-      ctx.fill();
-    }
-  }
-
-  function drawPlayer() {
-    var p = worldToScreen(player.x, player.y);
-    // flash while invulnerable after taking a hit
-    var flashing = player.hitTimer > 0 && Math.floor(player.hitTimer * 12) % 2 === 0;
-    var cls = player.tankClass ? CLASSES[player.tankClass] : null;
-
-    // Rammer classes draw a slowly-spinning dark spike ring behind the body
-    // (spike count scales with the class) instead of a barrel — the diep.io
-    // Smasher/Spike look.
-    if (cls && cls.rammer) {
-      ctx.save();
-      ctx.translate(p.x, p.y);
-      ctx.rotate(player.bodySpin);
-      ctx.beginPath();
-      var spikes = cls.spikes || 6, rOuter = player.radius + 7;
-      for (var k = 0; k < spikes; k++) {
-        var a = (k / spikes) * Math.PI * 2;
-        var sx = Math.cos(a) * rOuter, sy = Math.sin(a) * rOuter;
-        if (k === 0) ctx.moveTo(sx, sy); else ctx.lineTo(sx, sy);
-      }
-      ctx.closePath();
-      ctx.fillStyle = "#6f4a94";
-      ctx.fill();
-      ctx.restore();
-    }
-
-    // Barrel(s) — one rectangle per entry in the class's `barrels` array (or
-    // the single default barrel with no class). Drawn inside a frame rotated to
-    // turretAngle, so each barrel's own `a` rotates from "forward" (+x) and its
-    // `off` shifts it laterally (Twin's side-by-side barrels).
-    var barrels = cls ? cls.barrels : DEFAULT_BARRELS;
-    if (barrels) {
-      ctx.save();
-      ctx.translate(p.x, p.y);
-      ctx.rotate(player.turretAngle);
-      ctx.fillStyle = "#8fa3b3";
-      for (var bi = 0; bi < barrels.length; bi++) {
-        var br = barrels[bi];
-        var bLen = (player.radius + 18) * (br.len || 1);
-        var bWid = 14 * (br.w || 1);
-        ctx.save();
-        ctx.rotate(br.a || 0);
-        ctx.fillRect(0, (br.off || 0) - bWid / 2, bLen, bWid);
-        ctx.restore();
-      }
-      ctx.restore();
-    }
-
-    // Auto-turret barrel (Auto-Smasher line), aimed independently.
-    if (cls && cls.auto) {
-      ctx.save();
-      ctx.translate(p.x, p.y);
-      ctx.rotate(player.autoAngle);
-      ctx.fillStyle = "#6b7a88";
-      ctx.fillRect(0, -4, player.radius + 8, 8);
-      ctx.restore();
-    }
-
-    // Body — rammer classes get their class color to read as a distinct build.
-    ctx.beginPath();
-    ctx.arc(p.x, p.y, player.radius, 0, Math.PI * 2);
-    ctx.fillStyle = flashing ? "#ffffff" : (cls && cls.rammer ? "#b06fd6" : "#3fb6f0");
-    ctx.fill();
-    ctx.lineWidth = 3;
-    ctx.strokeStyle = cls && cls.rammer ? "#7a4fa0" : "#2a86ad";
-    ctx.stroke();
-
-    // Auto-turret hub drawn on top of the body so it reads as a mounted turret.
-    if (cls && cls.auto) {
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, player.radius * 0.5, 0, Math.PI * 2);
-      ctx.fillStyle = "#c9a0e8";
-      ctx.fill();
-      ctx.lineWidth = 2;
-      ctx.strokeStyle = "#8a63b0";
-      ctx.stroke();
-    }
-
-    // HP bar above the tank
-    var barW = player.radius * 2.2;
-    var ratio = Math.max(player.hp / player.maxHp, 0);
-    ctx.fillStyle = "rgba(0,0,0,0.4)";
-    ctx.fillRect(p.x - barW / 2, p.y - player.radius - 18, barW, 6);
-    ctx.fillStyle = ratio > 0.3 ? "#4caf50" : "#e05353";
-    ctx.fillRect(p.x - barW / 2, p.y - player.radius - 18, barW * ratio, 6);
-  }
-
-  function drawStick(stick, label) {
-    if (!stick.active) return;
-    ctx.beginPath();
-    ctx.arc(stick.originX, stick.originY, stick.maxRadius, 0, Math.PI * 2);
-    ctx.fillStyle = "rgba(255,255,255,0.10)";
-    ctx.fill();
-    ctx.lineWidth = 2;
-    ctx.strokeStyle = "rgba(255,255,255,0.25)";
-    ctx.stroke();
-
-    ctx.beginPath();
-    ctx.arc(stick.knobX, stick.knobY, 26, 0, Math.PI * 2);
-    ctx.fillStyle = "rgba(255,255,255,0.35)";
-    ctx.fill();
-  }
-
-  // Left inset for all top-left HUD/controls, honoring the notch safe area.
-  function hudPadX() { return 16 + safe.left; }
-  function hudPadY() { return 16 + safe.top; }
-
-  function drawHUD() {
-    // HP + level + XP bar, fixed in screen space (drawn outside the camera
-    // transform) so it never scrolls with the world, and positioned as a
-    // fraction of view size so it adapts to any screen/orientation.
-    var px = hudPadX(), py = hudPadY();
-    var barW = Math.min(280, view.w * 0.4);
-
-    ctx.font = "600 16px -apple-system, system-ui, sans-serif";
-    ctx.fillStyle = "#fff";
-    var title = "Level " + player.level;
-    if (player.tankClass) title += "  ·  " + CLASSES[player.tankClass].label;
-    ctx.fillText(title, px, py + 16);
-
-    // XP bar
-    var xpRatio = clamp(player.xp / player.xpToNext, 0, 1);
-    ctx.fillStyle = "rgba(0,0,0,0.4)";
-    ctx.fillRect(px, py + 24, barW, 8);
-    ctx.fillStyle = "#f2c14e";
-    ctx.fillRect(px, py + 24, barW * xpRatio, 8);
-
-    // HP bar
-    var hpRatio = clamp(player.hp / player.maxHp, 0, 1);
-    ctx.fillStyle = "rgba(0,0,0,0.4)";
-    ctx.fillRect(px, py + 40, barW, 10);
-    ctx.fillStyle = hpRatio > 0.3 ? "#4caf50" : "#e05353";
-    ctx.fillRect(px, py + 40, barW * hpRatio, 10);
-    ctx.fillStyle = "#fff";
-    ctx.font = "600 11px -apple-system, system-ui, sans-serif";
-    ctx.fillText(Math.max(0, Math.round(player.hp)) + " / " + player.maxHp, px, py + 60);
-  }
-
-  function roundRect(x, y, w, h, r) {
-    ctx.beginPath();
-    ctx.moveTo(x + r, y);
-    ctx.arcTo(x + w, y, x + w, y + h, r);
-    ctx.arcTo(x + w, y + h, x, y + h, r);
-    ctx.arcTo(x, y + h, x, y, r);
-    ctx.arcTo(x, y, x + w, y, r);
-    ctx.closePath();
-  }
-
-  // Wraps text within maxWidth, drawing each line centered at cx starting at y.
-  // ctx.font/fillStyle/textAlign must already be set by the caller.
-  function wrapText(text, cx, y, maxWidth, lineHeight) {
-    var words = text.split(" ");
-    var line = "";
-    var ly = y;
-    for (var i = 0; i < words.length; i++) {
-      var test = line + words[i] + " ";
-      if (ctx.measureText(test).width > maxWidth && line !== "") {
-        ctx.fillText(line, cx, ly);
-        line = words[i] + " ";
-        ly += lineHeight;
-      } else {
-        line = test;
-      }
-    }
-    ctx.fillText(line, cx, ly);
-  }
-
-  // The Status button sits directly under the HP bar (HUD ends around
-  // py+63 — see drawHUD), collapsed by default. Recomputed each call so it
-  // stays correctly placed across resize/orientation/safe-area changes.
-  function getStatusButtonRect() {
-    return { x: hudPadX(), y: hudPadY() + 68, w: Math.min(130, view.w * 0.32), h: 32 };
-  }
-
-  function drawStatusButton() {
-    var r = getStatusButtonRect();
-    var hasPoints = player.skillPoints > 0;
-
-    roundRect(r.x, r.y, r.w, r.h, 8);
-    ctx.fillStyle = hasPoints ? "rgba(255,213,74,0.92)" : "rgba(255,255,255,0.10)";
-    ctx.fill();
-    ctx.lineWidth = hasPoints ? 2 : 1;
-    ctx.strokeStyle = hasPoints ? "#ffffff" : "rgba(255,255,255,0.2)";
-    ctx.stroke();
-
-    ctx.fillStyle = hasPoints ? "#0d0f14" : "rgba(255,255,255,0.6)";
-    ctx.font = "700 13px -apple-system, system-ui, sans-serif";
-    ctx.textAlign = "center";
-    ctx.fillText("Status" + (hasPoints ? " (" + player.skillPoints + ")" : ""), r.x + r.w / 2, r.y + r.h / 2 + 4);
-    ctx.textAlign = "left";
-  }
-
-  // The 6 stat-upgrade buttons, laid out as a compact 2-column grid (3 rows)
-  // directly below the Status button. Only meaningful (drawn/hit-tested) while
-  // the menu is open AND skill points are available — see drawUpgradeMenu /
-  // handleUiTap.
-  function getExpandedUpgradeButtons() {
-    var sb = getStatusButtonRect();
-    var gap = 8, bw = 88, bh = 38, cols = 2;
-    var startX = sb.x, startY = sb.y + sb.h + 8;
-    var rects = [];
-    for (var i = 0; i < UPGRADES.length; i++) {
-      var col = i % cols, row = Math.floor(i / cols);
-      rects.push({
-        def: UPGRADES[i],
-        x: startX + col * (bw + gap),
-        y: startY + row * (bh + gap),
-        w: bw,
-        h: bh
-      });
-    }
-    return rects;
-  }
-
-  function drawUpgradeMenu() {
-    if (!statusMenuOpen || player.skillPoints <= 0) return;
-    var rects = getExpandedUpgradeButtons();
-
-    for (var i = 0; i < rects.length; i++) {
-      var rb = rects[i];
-      var tier = player.stats[rb.def.key];
-      var maxed = tier >= MAX_TIER;
-
-      roundRect(rb.x, rb.y, rb.w, rb.h, 6);
-      ctx.fillStyle = maxed ? "rgba(255,255,255,0.10)" : rb.def.color;
-      ctx.globalAlpha = maxed ? 1 : 0.92;
-      ctx.fill();
-      ctx.globalAlpha = 1;
-      ctx.lineWidth = maxed ? 1 : 2;
-      ctx.strokeStyle = maxed ? "rgba(255,255,255,0.2)" : "#ffffff";
-      ctx.stroke();
-
-      ctx.fillStyle = maxed ? "rgba(255,255,255,0.55)" : "#0d0f14";
-      ctx.font = "700 12px -apple-system, system-ui, sans-serif";
-      ctx.textAlign = "center";
-      ctx.fillText(rb.def.label, rb.x + rb.w / 2, rb.y + 16);
-      ctx.font = "600 10px -apple-system, system-ui, sans-serif";
-      ctx.fillText(maxed ? "MAX" : (tier + "/" + MAX_TIER), rb.x + rb.w / 2, rb.y + 31);
-      ctx.textAlign = "left";
-    }
-  }
-
-  // Class-choice cards for the CURRENT evolution options (base classes at L15,
-  // otherwise the chosen class's next-tier upgrades). Laid out as a single row
-  // in landscape or a 2-column grid in portrait, centered on screen.
-  function getEvolutionCards() {
-    var opts = evolutionOptions();
-    var margin = 20, gap = 16;
-    var cols = view.w > view.h ? opts.length : Math.min(opts.length, 2);
-    cols = Math.max(cols, 1);
-    var rows = Math.ceil(opts.length / cols);
-    var cw = (view.w - margin * 2 - gap * (cols - 1)) / cols;
-    var ch = Math.min(170, (view.h - margin * 2 - gap * (rows - 1)) / rows);
-    var totalW = cw * cols + gap * (cols - 1);
-    var totalH = ch * rows + gap * (rows - 1);
-    var startX = (view.w - totalW) / 2;
-    var startY = (view.h - totalH) / 2;
-    var cards = [];
-    for (var i = 0; i < opts.length; i++) {
-      var col = i % cols, row = Math.floor(i / cols);
-      var key = opts[i];
-      cards.push({
-        key: key,
-        def: CLASSES[key],
-        x: startX + col * (cw + gap),
-        y: startY + row * (ch + gap),
-        w: cw,
-        h: ch
-      });
-    }
-    return cards;
-  }
-
-  function drawEvolutionOverlay() {
-    ctx.fillStyle = "rgba(5,6,10,0.88)";
-    ctx.fillRect(0, 0, view.w, view.h);
-
-    var cards = getEvolutionCards();
-
-    ctx.textAlign = "center";
-    ctx.fillStyle = "#fff";
-    ctx.font = "700 20px -apple-system, system-ui, sans-serif";
-    var tierNum = player.classTier + 1; // the tier being chosen
-    ctx.fillText("Evolve — Tier " + tierNum + " (Level " + player.level + ")", view.w / 2, Math.max(28 + safe.top, cards[0].y - 20));
-
-    for (var i = 0; i < cards.length; i++) {
-      var c = cards[i];
-      roundRect(c.x, c.y, c.w, c.h, 10);
-      ctx.fillStyle = c.def.color;
-      ctx.globalAlpha = 0.92;
-      ctx.fill();
-      ctx.globalAlpha = 1;
-      ctx.lineWidth = 2;
-      ctx.strokeStyle = "#ffffff";
-      ctx.stroke();
-
-      ctx.fillStyle = "#0d0f14";
-      ctx.font = "700 16px -apple-system, system-ui, sans-serif";
-      ctx.fillText(c.def.label, c.x + c.w / 2, c.y + 28);
-      ctx.font = "500 12px -apple-system, system-ui, sans-serif";
-      wrapText(c.def.desc, c.x + c.w / 2, c.y + 50, c.w - 20, 15);
-    }
-    ctx.textAlign = "left";
-  }
-
-  // Remote players/bullets from the multiplayer scaffold. No-ops while offline
-  // (maps stay empty), so this is free in single-player.
-  function drawRemotePlayers() {
-    for (var id in NET.remotePlayers) {
-      if (!NET.remotePlayers.hasOwnProperty(id)) continue;
-      var rp = NET.remotePlayers[id];
-      var p = worldToScreen(rp.x, rp.y);
-      if (p.x < -40 || p.x > view.w + 40 || p.y < -40 || p.y > view.h + 40) continue;
-      var rcls = rp.cls && CLASSES[rp.cls] ? CLASSES[rp.cls] : null;
-      var rad = PLAYER_BASE.radius * (rcls && rcls.bodyRadiusMult ? rcls.bodyRadiusMult : 1);
-      // barrel
-      ctx.save();
-      ctx.translate(p.x, p.y);
-      ctx.rotate(rp.angle || 0);
-      ctx.fillStyle = "#9aa6ad";
-      ctx.fillRect(0, -6, rad + 16, 12);
-      ctx.restore();
-      // body (red-ish to distinguish enemies from the local cyan tank)
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, rad, 0, Math.PI * 2);
-      ctx.fillStyle = "#e0685c";
-      ctx.fill();
-      ctx.lineWidth = 3;
-      ctx.strokeStyle = "#a8443b";
-      ctx.stroke();
-      // name + hp bar
-      if (rp.name) {
-        ctx.fillStyle = "#fff";
-        ctx.font = "600 11px -apple-system, system-ui, sans-serif";
-        ctx.textAlign = "center";
-        ctx.fillText(rp.name, p.x, p.y - rad - 10);
-        ctx.textAlign = "left";
-      }
-    }
-  }
-
-  function drawRemoteBullets() {
-    ctx.fillStyle = "#ffd0c0";
-    for (var i = 0; i < NET.remoteBullets.length; i++) {
-      var b = NET.remoteBullets[i];
-      var p = worldToScreen(b.x, b.y);
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, b.r || 6, 0, Math.PI * 2);
-      ctx.fill();
-    }
-  }
-
-  function render() {
-    ctx.clearRect(0, 0, view.w, view.h);
-    ctx.fillStyle = "#12141a";
-    ctx.fillRect(0, 0, view.w, view.h);
-
-    drawGrid();
-    drawWorldBounds();
-    drawShapes();
-    drawRemoteBullets();
-    drawBullets();
-    drawRemotePlayers();
-    drawPlayer();
-
-    drawStick(moveStick);
-    drawStick(aimStick);
-    drawHUD();
-    drawStatusButton();
-    drawUpgradeMenu();
-
-    // Evolution overlay is drawn last so it sits on top of everything and
-    // fully covers the HUD/menu while an evolution choice is pending.
-    if (player.evolutionPending) drawEvolutionOverlay();
-  }
-
-  // ======================================================================
-  // 8. MAIN LOOP
-  //    dt is clamped so a backgrounded tab / dev-tools pause doesn't cause
-  //    a huge simulation step (e.g. tank flying through walls) on resume.
-  // ======================================================================
-  var lastTime = performance.now();
-
-  function frame(now) {
-    var dt = Math.min((now - lastTime) / 1000, 1 / 30);
-    lastTime = now;
-
-    updatePlayer(dt);
-    updateBullets(dt);
-    updateShapes(dt);
-    checkCollisions();
-    updateCamera(dt);
-    NET.update(dt); // push local state to the server (no-op while offline)
-
-    render();
-
-    requestAnimationFrame(frame);
-  }
-
-  requestAnimationFrame(frame);
 })();
 </script>
 </body>
