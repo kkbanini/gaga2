@@ -1401,6 +1401,8 @@
     };
     drones = [];
     notif = { text: "A " + def.name + " has appeared at the center!", timer: 4 };
+    // Reset the on-screen countdown to a full 10:00 the instant the boss spawns.
+    bossTimer = BOSS_INTERVAL; bossWarningActive = false;
   }
   function killBoss(ownerId) {
     if (!boss) return;
@@ -2283,6 +2285,36 @@
     ctx.textAlign = "left";
   }
 
+  // Compact "next boss" countdown, pinned to the bottom-right corner and kept
+  // small/low-contrast so it never blocks the view. Safe-area aware for phones.
+  function drawBossCountdown() {
+    var label;
+    if (boss) {
+      label = "Boss: LIVE";
+    } else {
+      var t = Math.max(0, Math.ceil(bossTimer));
+      var mm = Math.floor(t / 60), ss = t % 60;
+      label = "Next Boss: " + (mm < 10 ? "0" + mm : mm) + ":" + (ss < 10 ? "0" + ss : ss);
+    }
+    var color = (boss || bossWarningActive) ? "#ff6b6b" : "rgba(255,255,255,0.85)";
+    var padX = 8, padY = 4, h = 20, gap = 10;
+    ctx.font = "700 12px -apple-system, system-ui, sans-serif";
+    var w = ctx.measureText(label).width;
+    var right = view.w - gap - safe.right;
+    var bottom = view.h - gap - safe.bottom;
+    var boxX = right - w - padX * 2, boxY = bottom - h;
+    // subtle backing pill so the text stays readable over the world
+    ctx.fillStyle = "rgba(12,16,24,0.42)";
+    roundRect(boxX, boxY, w + padX * 2, h, 6);
+    ctx.fill();
+    ctx.fillStyle = color;
+    ctx.textAlign = "right";
+    ctx.textBaseline = "middle";
+    ctx.fillText(label, right - padX, boxY + h / 2 + 0.5);
+    ctx.textAlign = "left";
+    ctx.textBaseline = "alphabetic";
+  }
+
   function render() {
     ctx.clearRect(0, 0, view.w, view.h);
     ctx.fillStyle = "#12141a";
@@ -2311,6 +2343,7 @@
       drawStick(aimStick);
       drawHUD();
       drawStatusButton();
+      drawBossCountdown();
       drawUpgradeMenu();
       if (player.evolutionPending) drawEvolutionOverlay();
     }
