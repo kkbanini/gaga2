@@ -1,5 +1,5 @@
 {
-  "version": "1.3.1",
+  "version": "1.4.0",
   "game": "game.html",
-  "notes": "Tank Arena OTA manifest. Bump 'version' whenever game.html changes so clients download and cache the new build. 1.3.1 = compact bottom-right 'Next Boss' spawn countdown (safe-area aware). 1.3.0 = TRUE real-time online multiplayer (WebSocket): live sync of positions, barrels, fire events, levels, scores, teams and names across all connected players; region selector removed; AI bots removed. Set your server URL via MULTIPLAYER_URL in game.html or window.TANK_NET_URL (see server/)."
+  "notes": "Tank Arena OTA manifest. Bump 'version' whenever game.html changes so clients download and cache the new build. 1.4.0 = Sandbox mode (Max Level / Reset Level testing panel) + early-game attack-speed nerf (slow base fire rate; Reload stat scales it up sharply). 1.3.1 = compact bottom-right 'Next Boss' spawn countdown (safe-area aware). 1.3.0 = TRUE real-time online multiplayer (WebSocket): live sync of positions, barrels, fire events, levels, scores, teams and names across all connected players; region selector removed; AI bots removed. Set your server URL via MULTIPLAYER_URL in game.html or window.TANK_NET_URL (see server/)."
 }

@@ -45,7 +45,9 @@ Until then the APK still runs fine from its bundled fallback.
 - An **8-stat** skill-point menu opened via the **Status** button under the
   health bar: Health Regen, Max Health, Body Damage, Bullet Speed, Bullet
   Penetration, Bullet Damage, Reload, Movement Speed (cap 8, raised to 10 for
-  the Smasher line).
+  the Smasher line). The tank starts with a deliberately **slow base fire rate**;
+  investing in **Reload** scales attack speed up sharply (≈3× faster when maxed),
+  so it's an essential mid/late-game stat.
 - **Rammer / body-damage mechanics** — colliding with a shape damages both it
   and you; Body Damage tunes the ramming output.
 - An **authentic Diep.io class evolution tree** — pick a base class at Level 15
@@ -58,9 +60,17 @@ Until then the APK still runs fine from its bundled fallback.
   Auto-Smasher / Spike ramming line.
 - Health regeneration after a few seconds without taking damage.
 - Smooth camera follow.
-- A **main-menu lobby** (Diep.io style): FFA or 2 Teams and username entry. In
-  2 Teams mode the tank/bullet/nameplate take the team colour, the server
-  auto-balances the two teams on join, and same-team friendly fire is disabled.
+- A **main-menu lobby** (Diep.io style): FFA, 2 Teams, or Sandbox, plus username
+  entry. In 2 Teams mode the tank/bullet/nameplate take the team colour, the
+  server auto-balances the two teams on join, and same-team friendly fire is
+  disabled.
+- A **Sandbox mode** for testing builds: a compact on-screen panel (top-right,
+  under the minimap, safe-area aware) with **Max Level** (jump to level 45 and
+  grant all skill points + evolutions so you can try top-tier classes instantly)
+  and **Reset Level** (wipe back to a clean level 1 — no class, points, or spent
+  stats). Sandbox stays offline (no multiplayer) so it's a private testbed.
+- An in-game **"Next Boss" countdown** pinned to the bottom-right corner
+  (safe-area aware) showing the time until the next Mythical Boss.
 - **True real-time online multiplayer** (see below): other tanks on the map are
   *real players*, and a **top-right minimap** (safe-area aware) shows you, the
   other players (team-coloured), and a pulsing skull at the boss.
