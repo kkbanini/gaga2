@@ -2,8 +2,8 @@
 /platforms/
 /plugins/
 
-# Node
-/node_modules/
+# Node (root and server/)
+node_modules/
 
 # Build artifacts
 *.apk

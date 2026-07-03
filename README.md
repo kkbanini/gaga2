@@ -58,11 +58,12 @@ Until then the APK still runs fine from its bundled fallback.
   Auto-Smasher / Spike ramming line.
 - Health regeneration after a few seconds without taking damage.
 - Smooth camera follow.
-- A **main-menu lobby** (Diep.io style): FFA or 2 Teams, region + username entry,
-  and a team-balance lock. In 2 Teams mode the tank/bullet/nameplate take the
-  team colour, bots are split evenly, and same-team friendly fire is disabled.
-- **AI bots** populate the arena, and a **top-right minimap** (safe-area aware)
-  shows the player, bots (team-coloured), and a pulsing skull at the boss.
+- A **main-menu lobby** (Diep.io style): FFA or 2 Teams and username entry. In
+  2 Teams mode the tank/bullet/nameplate take the team colour, the server
+  auto-balances the two teams on join, and same-team friendly fire is disabled.
+- **True real-time online multiplayer** (see below): other tanks on the map are
+  *real players*, and a **top-right minimap** (safe-area aware) shows you, the
+  other players (team-coloured), and a pulsing skull at the boss.
 - A **Mythical Boss** spawns at the map center every 10 minutes (with a 10-second
   blinking warning). One of four bosses appears — Polygon King, Summoner Core,
   Giga Smasher, Omega Dreadnought — each with a giant health bar. Landing the
@@ -127,23 +128,53 @@ Push to this branch (or trigger it manually) to run
 builds a debug APK in CI, and uploads it as a downloadable workflow
 artifact — no local Android tooling required.
 
-## Online multiplayer (foundation)
+## Online multiplayer (real-time)
 
-The game ships with a lightweight, transport-only WebSocket client scaffold
-(`NET` in `www/index.html`). It is **disabled by default** so the game runs
-fully offline in the APK. To connect to a server, set the endpoint before the
-game loads:
+The game has **true real-time online multiplayer** over WebSockets. When a
+server URL is configured, every client connects automatically on **Play!** and
+syncs — in real time, across everyone connected — each tank's position, barrels
+(class/turret), bullet fire events, level, score, team (Red/Blue) and name.
+Your friends install the APK, type a name, and you see their tanks moving and
+shooting on your screen.
 
-```html
-<script>window.TANK_NET_URL = "wss://your-server.example";</script>
+**Architecture (relay, peer-authoritative over self):** each client simulates
+and owns its *own* tank and HP and broadcasts that state ~20 Hz; the server
+relays everyone's state + fire events and balances the two teams on join. Remote
+tanks are interpolated between snapshots; a peer's `fire` event spawns a locally
+simulated bullet that can damage your tank. The local simulation always stays
+authoritative for your own tank, so an unreachable server **never** breaks
+single-player — the game just runs solo and auto-reconnects in the background.
+
+### Run a server
+
+A complete, production-ready Node.js server lives in [`server/`](server/) — one
+`server.js` (using [`ws`](https://www.npmjs.com/package/ws)) plus a
+`package.json`. It manages the global arena, relays movement/fire, and handles
+2-Teams balancing. See [`server/README.md`](server/README.md) for **free
+hosting instructions on Render, Railway, or Fly.io**.
+
+```bash
+cd server && npm install && npm start   # ws://localhost:8080
 ```
 
-or call `NET.connect("wss://…")` at runtime. The JSON wire protocol is
-documented inline above the `NET` object. When connected, the client pushes the
-local tank's state (~20 Hz) and renders remote players/bullets from server
-`snapshot` frames. The local simulation stays authoritative for the local tank,
-so a missing/unreachable server never breaks single-player. Note: no game
-*server* is included — this is the client foundation to build one against.
+### Point the game at your server
+
+The client reads the endpoint from (in order):
+
+1. `window.TANK_NET_URL` — set before the game loads (handy for local testing):
+   ```html
+   <script>window.TANK_NET_URL = "wss://your-app.onrender.com";</script>
+   ```
+2. The `MULTIPLAYER_URL` constant near the top of `docs/game.html` — replace the
+   placeholder with your deployed URL and everyone (including the APK, after the
+   OTA update ships) connects automatically.
+
+**Use `wss://` (TLS) in production.** A page served over HTTPS (GitHub Pages or
+the APK's cached copy) is blocked from opening an insecure `ws://` socket;
+`ws://` is only for `http://localhost` testing.
+
+From the browser console you can inspect the live connection with
+`TankMP.connected`, `TankMP.id`, and `TankMP.remotes`.
 
 ## iOS / Safari / WebView support
 

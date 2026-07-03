@@ -1,5 +1,5 @@
 {
-  "version": "1.2.0",
+  "version": "1.3.0",
   "game": "game.html",
-  "notes": "Tank Arena OTA manifest. Bump 'version' whenever game.html changes so clients download and cache the new build. 1.2.0 = main-menu lobby (FFA/2 Teams), usernames, bots, minimap, and the Mythical Boss system."
+  "notes": "Tank Arena OTA manifest. Bump 'version' whenever game.html changes so clients download and cache the new build. 1.3.0 = TRUE real-time online multiplayer (WebSocket): live sync of positions, barrels, fire events, levels, scores, teams and names across all connected players; region selector removed; AI bots removed. Set your server URL via MULTIPLAYER_URL in game.html or window.TANK_NET_URL (see server/)."
 }

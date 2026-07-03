@@ -145,12 +145,6 @@
         <option value="ffa">FFA</option>
         <option value="teams">2 Teams</option>
       </select>
-      <select id="regionSel" aria-label="Region">
-        <option>Singapore (120)</option>
-        <option>Tokyo (98)</option>
-        <option>Frankfurt (140)</option>
-        <option>New York (176)</option>
-      </select>
     </div>
     <div id="teamRow" class="lobbyRow" style="display:none;">
       <button type="button" class="teamBtn red" data-team="red">Red Team</button>
@@ -232,6 +226,13 @@
   var WORLD = { w: 6000, h: 6000 };
   var GRID_SIZE = 100;
 
+  // ---- Real-time online multiplayer ----
+  // Point this at your deployed server.js (see the repo's server.js + README).
+  // Use a "wss://" URL for HTTPS/APK contexts. You can also override it at
+  // runtime with window.TANK_NET_URL. Until it's set to a real server the game
+  // runs solo (you + shapes + bosses); once set, real friends appear live.
+  var MULTIPLAYER_URL = "wss://REPLACE-WITH-YOUR-SERVER.onrender.com";
+
   // ---- Game state / lobby / teams ----
   var MAX_LEVEL = 45;                 // diep.io hard level cap
   var gameState = "lobby";            // "lobby" while the menu is up, "playing" after Play!
@@ -243,9 +244,10 @@
     blue: { body: "#4d8fe0", stroke: "#2a6bb0", bullet: "#8fbdf0", name: "#9cc4ff" },
     ffa:  { body: "#3fb6f0", stroke: "#2a86ad", bullet: "#f2f2f2", name: "#ffffff" }
   };
-  var NUM_BOTS = 10;                  // AI tanks that populate the arena / fill teams
-  var BOT_NAMES = ["Rex","Nova","Zed","Kilo","Mango","Bolt","Echo","Vex","Juno","Pixel",
-                   "Onyx","Sable","Fizz","Gizmo","Halo","Iris"];
+  // No AI bots — this is real-time online multiplayer; other tanks are REAL
+  // players synced over the network (see NET). Kept at 0 so nothing local
+  // "mimics" players.
+  var NUM_BOTS = 0;
 
   // ---- Mythical Boss System ----
   var BOSS_INTERVAL = 600;            // seconds between boss spawns (exactly 10 minutes)
@@ -748,6 +750,7 @@
       id: "you",
       team: playerTeam,
       name: playerName,
+      score: 0,
       bulletColor: (TEAM[playerTeam] || TEAM.ffa).bullet,
       x: WORLD.w / 2,
       y: WORLD.h / 2,
@@ -942,6 +945,8 @@
       // thruster barrels therefore drive the tank forward.
       if (recoil) { player.vx -= Math.cos(ang) * recoil; player.vy -= Math.sin(ang) * recoil; }
     }
+    // Broadcast the shot so peers see us fire (and can be hit by it).
+    NET.sendFire(speed, dmg, radius);
   }
 
   // The auto-turret's small independent shot: weak, fast, auto-aimed.
@@ -999,19 +1004,96 @@
   //   Remote players/bullets are tracked and rendered; local sim stays
   //   authoritative for the local tank so single-player is unaffected.
   // ======================================================================
+  // Live remote players (other real clients) and their in-flight bullets. These
+  // are populated by NET from the server and rendered/collided locally. Each
+  // client is authoritative over its OWN tank; peers see it via these.
+  var remotes = [];        // [{ id, x, y, tx, ty, a, cls, hp, maxHp, level, team, name, score, radius }]
+  var remoteBullets = [];  // bullets fired by peers; damage the LOCAL player only
+
+  function findRemote(id) { for (var i = 0; i < remotes.length; i++) if (remotes[i].id === id) return remotes[i]; return null; }
+  // Reconcile the authoritative player list from the server into `remotes`.
+  function applyPlayers(list) {
+    var seen = {};
+    for (var i = 0; i < list.length; i++) {
+      var pl = list[i];
+      if (pl.id === NET.selfId) continue; // never mirror our own tank
+      seen[pl.id] = true;
+      var r = findRemote(pl.id);
+      var rcls = pl.cls && CLASSES[pl.cls] ? CLASSES[pl.cls] : null;
+      var rad = PLAYER_BASE.radius * (rcls && rcls.bodyRadiusMult ? rcls.bodyRadiusMult : 1);
+      if (!r) {
+        r = { id: pl.id, x: pl.x, y: pl.y };
+        remotes.push(r);
+      }
+      r.tx = pl.x; r.ty = pl.y;           // interpolate toward these
+      r.a = pl.a || 0; r.cls = pl.cls || null;
+      r.hp = pl.hp; r.maxHp = pl.maxHp; r.level = pl.level || 1;
+      r.team = pl.team || "ffa"; r.name = pl.name || "player";
+      r.score = pl.score || 0; r.radius = rad;
+    }
+    // Drop players no longer present.
+    for (var j = remotes.length - 1; j >= 0; j--) if (!seen[remotes[j].id]) remotes.splice(j, 1);
+  }
+  function removeRemote(id) { for (var i = remotes.length - 1; i >= 0; i--) if (remotes[i].id === id) remotes.splice(i, 1); }
+
+  // A peer fired: reconstruct their shot from the class barrel pattern as
+  // locally-simulated bullets that can hit (only) the local player.
+  function spawnRemoteFire(m) {
+    var cls = m.cls && CLASSES[m.cls] ? CLASSES[m.cls] : null;
+    var barrels = cls ? cls.barrels : DEFAULT_BARRELS;
+    if (!barrels) return;
+    var col = (TEAM[m.team] || TEAM.ffa).bullet;
+    for (var i = 0; i < barrels.length; i++) {
+      var br = barrels[i];
+      var ang = (m.a || 0) + (br.a || 0);
+      var sp = (m.spd || PLAYER_BASE.bulletSpeed) * (br.sMult || 1);
+      var off = br.off || 0;
+      var ox = -Math.sin(ang) * off, oy = Math.cos(ang) * off;
+      remoteBullets.push({
+        x: m.x + Math.cos(ang) * (PLAYER_BASE.radius + 10) + ox,
+        y: m.y + Math.sin(ang) * (PLAYER_BASE.radius + 10) + oy,
+        vx: Math.cos(ang) * sp, vy: Math.sin(ang) * sp,
+        life: PLAYER_BASE.bulletLife, radius: (m.r || PLAYER_BASE.bulletRadius) * (br.rMult || 1),
+        dmg: (m.dmg || PLAYER_BASE.bulletDamage) * (br.dMult || 1),
+        team: m.team || "ffa", ownerId: m.id, color: col
+      });
+    }
+  }
+  function updateRemotes(dt) {
+    var t = 1 - Math.exp(-14 * dt); // smooth toward the latest server position
+    for (var i = 0; i < remotes.length; i++) {
+      var r = remotes[i];
+      if (r.tx !== undefined) { r.x += (r.tx - r.x) * t; r.y += (r.ty - r.y) * t; }
+    }
+  }
+  function updateRemoteBullets(dt) {
+    for (var i = remoteBullets.length - 1; i >= 0; i--) {
+      var b = remoteBullets[i];
+      b.x += b.vx * dt; b.y += b.vy * dt; b.life -= dt;
+      var gone = b.life <= 0 || b.x < 0 || b.x > WORLD.w || b.y < 0 || b.y > WORLD.h;
+      // A peer's bullet damages the LOCAL player (each client owns its own HP).
+      if (!gone && gameState === "playing" && bulletHitsTank(b, player) && circleHit(b, player)) {
+        damageTank(player, b.dmg);
+        if (player === player && player.hp !== undefined) { /* score handled by killer's client */ }
+        gone = true;
+      }
+      if (gone) remoteBullets.splice(i, 1);
+    }
+  }
+
+  // ---- WebSocket network module (real-time multiplayer) ----
   var NET = {
-    url: (typeof window !== "undefined" && window.TANK_NET_URL) || null,
+    url: (typeof window !== "undefined" && window.TANK_NET_URL) ||
+         (MULTIPLAYER_URL.indexOf("REPLACE-WITH") < 0 ? MULTIPLAYER_URL : null),
     ws: null,
     connected: false,
+    wantConnect: false,
     selfId: null,
-    name: "Player",
-    remotePlayers: {},   // id -> { x, y, angle, cls, hp, maxHp, name }
-    remoteBullets: [],   // [ { x, y, r } ]
     sendTimer: 0,
-    sendInterval: 0.05,  // 20 Hz outbound state
+    sendInterval: 0.05,     // 20 Hz outbound state
+    reconnectTimer: 0,
 
-    connect: function (url) {
-      this.url = url || this.url;
+    connect: function () {
       if (!this.url || typeof WebSocket === "undefined") return;
       try {
         var ws = new WebSocket(this.url);
@@ -1019,24 +1101,30 @@
         var self = this;
         ws.onopen = function () {
           self.connected = true;
-          self.send({ t: "join", name: self.name });
+          self.send({ t: "join", name: playerName, team: playerTeam, mode: gameMode,
+                      cls: player.tankClass, level: player.level });
         };
         ws.onmessage = function (ev) { self._onMessage(ev.data); };
-        ws.onclose = function () { self.connected = false; self.remotePlayers = {}; self.remoteBullets = []; };
-        ws.onerror = function () { /* onclose handles state reset */ };
-      } catch (e) { /* stay offline on any failure */ }
+        ws.onclose = function () {
+          self.connected = false; remotes = []; remoteBullets = [];
+          if (self.wantConnect) self.reconnectTimer = 2; // auto-reconnect
+        };
+        ws.onerror = function () { /* onclose resets + schedules reconnect */ };
+      } catch (e) { /* stay solo on any failure */ }
     },
-
+    // Called from Play: begin (and keep) a live connection.
+    start: function () { this.wantConnect = true; if (!this.connected) this.connect(); },
     disconnect: function () {
+      this.wantConnect = false;
       if (this.ws) { try { this.ws.close(); } catch (e) {} }
-      this.ws = null; this.connected = false;
-      this.remotePlayers = {}; this.remoteBullets = [];
+      this.ws = null; this.connected = false; remotes = []; remoteBullets = [];
     },
-
-    send: function (obj) {
-      if (this.connected && this.ws) {
-        try { this.ws.send(JSON.stringify(obj)); } catch (e) {}
-      }
+    send: function (obj) { if (this.connected && this.ws) { try { this.ws.send(JSON.stringify(obj)); } catch (e) {} } },
+    // Broadcast a shot so peers can see us fire.
+    sendFire: function (spd, dmg, r) {
+      this.send({ t: "fire", id: this.selfId, x: Math.round(player.x), y: Math.round(player.y),
+                  a: +player.turretAngle.toFixed(3), cls: player.tankClass, team: player.team,
+                  spd: Math.round(spd), dmg: Math.round(dmg), r: Math.round(r) });
     },
 
     _onMessage: function (data) {
@@ -1044,39 +1132,57 @@
       try { msg = JSON.parse(data); } catch (e) { return; }
       if (msg.t === "welcome") {
         this.selfId = msg.id;
-      } else if (msg.t === "snapshot") {
-        var map = {};
-        var list = msg.players || [];
-        for (var i = 0; i < list.length; i++) {
-          var pl = list[i];
-          if (pl.id === this.selfId) continue; // never render our own echo
-          map[pl.id] = pl;
+        // Server may reassign our team to balance 2-Teams mode.
+        if (msg.team && gameMode === "teams" && msg.team !== playerTeam) {
+          playerTeam = msg.team; player.team = msg.team;
+          player.bulletColor = (TEAM[msg.team] || TEAM.ffa).bullet;
+          notif = { text: "Assigned to " + (msg.team === "red" ? "Red" : "Blue") + " Team for balance", timer: 4 };
         }
-        this.remotePlayers = map;
-        this.remoteBullets = msg.bullets || [];
+      } else if (msg.t === "players") {
+        applyPlayers(msg.list || []);
+      } else if (msg.t === "fire") {
+        if (msg.id !== this.selfId) spawnRemoteFire(msg);
       } else if (msg.t === "leave") {
-        delete this.remotePlayers[msg.id];
+        removeRemote(msg.id);
       }
     },
 
-    // Push local state at a fixed rate; no-op while offline.
     update: function (dt) {
+      if (this.reconnectTimer > 0) {
+        this.reconnectTimer -= dt;
+        if (this.reconnectTimer <= 0 && this.wantConnect && !this.connected) this.connect();
+      }
       if (!this.connected) return;
       this.sendTimer -= dt;
       if (this.sendTimer <= 0) {
         this.sendTimer = this.sendInterval;
         this.send({
-          t: "state",
-          x: Math.round(player.x), y: Math.round(player.y),
-          angle: +player.turretAngle.toFixed(3),
-          cls: player.tankClass, hp: Math.round(player.hp),
-          maxHp: player.maxHp, level: player.level
+          t: "state", x: Math.round(player.x), y: Math.round(player.y),
+          a: +player.turretAngle.toFixed(3), cls: player.tankClass,
+          hp: Math.round(player.hp), maxHp: player.maxHp, level: player.level,
+          score: player.score || 0, team: player.team, name: player.name
         });
       }
     }
   };
-  // Auto-connect only if an endpoint was provided; otherwise stay offline.
-  if (NET.url) NET.connect();
+
+  // Read-only multiplayer status, exposed for quick debugging from the browser
+  // console. e.g. `TankMP.connected` to confirm the socket is live, or
+  // `TankMP.remotes` to list the other real players the client is rendering.
+  if (typeof window !== "undefined") {
+    window.TankMP = {
+      get connected() { return NET.connected; },
+      get id() { return NET.selfId; },
+      get url() { return NET.url; },
+      get remotes() {
+        return remotes.map(function (r) {
+          return { id: r.id, name: r.name, team: r.team, level: r.level,
+                   x: Math.round(r.x), y: Math.round(r.y), hp: Math.round(r.hp) };
+        });
+      },
+      get remoteBullets() { return remoteBullets.length; }
+    };
+  }
 
   // ======================================================================
   // 6. UPDATE LOGIC
@@ -1256,12 +1362,13 @@
     }
     return best;
   }
+  // Local player plus live remote players — used for boss/drone targeting and
+  // the minimap. (Remote tanks are visual + AI targets; each peer is
+  // authoritative over its own HP, so local hazards only damage `player`.)
   function allTanks() {
-    var out = [player];
-    for (var i = 0; i < bots.length; i++) if (bots[i].alive) out.push(bots[i]);
-    return out;
+    return [player].concat(remotes);
   }
-  function findBot(id) { for (var i = 0; i < bots.length; i++) if (bots[i].id === id) return bots[i]; return null; }
+  function findBot(id) { return null; } // bots removed; kept as a no-op for callers
 
   // Damage rule: a bullet hurts a tank if it's not the owner and either it's a
   // boss bullet, or FFA, or the tank is on a different team (friendly fire off).
@@ -1282,74 +1389,6 @@
     }
   }
 
-  // ---- Bots ----
-  function makeBot(team) {
-    var col = TEAM[team] || TEAM.ffa;
-    return {
-      id: "bot" + (botIdSeq++),
-      team: team, name: BOT_NAMES[Math.floor(Math.random() * BOT_NAMES.length)],
-      bulletColor: col.bullet,
-      x: randRange(200, WORLD.w - 200), y: randRange(200, WORLD.h - 200),
-      vx: 0, vy: 0, angle: 0, radius: PLAYER_BASE.radius,
-      hp: 120, maxHp: 120, alive: true, respawnTimer: 0,
-      fireTimer: randRange(0, 1), hitTimer: 0, regenTimer: 0,
-      wanderTimer: 0, targetX: WORLD.w / 2, targetY: WORLD.h / 2,
-      bodyDamage: 16
-    };
-  }
-  var botIdSeq = 0;
-  function initBots() {
-    bots = [];
-    for (var i = 0; i < NUM_BOTS; i++) {
-      var team = gameMode === "teams" ? (i % 2 === 0 ? "red" : "blue") : "ffa";
-      bots.push(makeBot(team));
-    }
-  }
-  function updateBots(dt) {
-    for (var i = 0; i < bots.length; i++) {
-      var bt = bots[i];
-      if (!bt.alive) {
-        bt.respawnTimer -= dt;
-        if (bt.respawnTimer <= 0) {
-          var nb = makeBot(bt.team); nb.id = bt.id; bots[i] = nb;
-        }
-        continue;
-      }
-      if (bt.hitTimer > 0) bt.hitTimer -= dt;
-      // Wander toward a waypoint; repick periodically.
-      bt.wanderTimer -= dt;
-      if (bt.wanderTimer <= 0) {
-        bt.wanderTimer = randRange(2, 5);
-        bt.targetX = randRange(200, WORLD.w - 200);
-        bt.targetY = randRange(200, WORLD.h - 200);
-      }
-      var mx = bt.targetX - bt.x, my = bt.targetY - bt.y;
-      var ml = Math.sqrt(mx * mx + my * my) || 1;
-      bt.vx += (mx / ml) * 500 * dt; bt.vy += (my / ml) * 500 * dt;
-      var drag = Math.exp(-6 * dt); bt.vx *= drag; bt.vy *= drag;
-      var sp = Math.sqrt(bt.vx * bt.vx + bt.vy * bt.vy), mxs = 190;
-      if (sp > mxs) { bt.vx *= mxs / sp; bt.vy *= mxs / sp; }
-      bt.x = clamp(bt.x + bt.vx * dt, bt.radius, WORLD.w - bt.radius);
-      bt.y = clamp(bt.y + bt.vy * dt, bt.radius, WORLD.h - bt.radius);
-      // Aim at the boss if near, else nearest enemy tank, else nearest shape.
-      var tgt = null;
-      if (boss && Math.hypot(boss.x - bt.x, boss.y - bt.y) < 900) tgt = boss;
-      if (!tgt) tgt = nearestTank(bt.x, bt.y, 700, gameMode === "teams" ? bt.team : null);
-      if (!tgt) tgt = nearestShape(bt.x, bt.y, 500);
-      bt.fireTimer -= dt;
-      if (tgt) {
-        bt.angle = Math.atan2(tgt.y - bt.y, tgt.x - bt.x);
-        if (bt.fireTimer <= 0) {
-          bt.fireTimer = 0.5;
-          spawnBulletFrom(bt, bt.angle, 0, 560, 10, PLAYER_BASE.bulletRadius, PLAYER_BASE.bulletLife, 1);
-        }
-      }
-      // Slow regen.
-      bt.regenTimer += dt;
-      if (bt.regenTimer > REGEN_DELAY && bt.hp < bt.maxHp) bt.hp = Math.min(bt.maxHp, bt.hp + bt.maxHp * 0.06 * dt);
-    }
-  }
-
   // ---- Boss ----
   function spawnBoss() {
     var key = BOSS_ORDER[Math.floor(Math.random() * BOSS_ORDER.length)];
@@ -1367,7 +1406,7 @@
     if (!boss) return;
     var killer = ownerId === "you" ? player.name : (findBot(ownerId) ? findBot(ownerId).name : "A tank");
     notif = { text: killer + " has defeated the " + boss.name + "!", timer: 6 };
-    if (ownerId === "you") grantLevels(BOSS_LEVEL_REWARD); // instant +10 levels (capped)
+    if (ownerId === "you") { grantLevels(BOSS_LEVEL_REWARD); player.score += 500; } // instant +10 levels (capped)
     boss = null; drones = [];
     bossTimer = BOSS_INTERVAL; bossWarningActive = false;
   }
@@ -1471,18 +1510,17 @@
         }
         if (b.pierce <= 0) { bullets.splice(bi, 1); continue; }
       }
-      // vs tanks (player + bots)
-      var tanks = allTanks();
-      for (var ti = 0; ti < tanks.length; ti++) {
-        var t = tanks[ti];
-        if (b.hit.indexOf(t) >= 0 || !bulletHitsTank(b, t)) continue;
-        if (circleHit(b, t)) { damageTank(t, b.dmg); b.hit.push(t); b.pierce -= 1; break; }
+      // vs the LOCAL player only: boss bullets hit us; our own bullets skip us
+      // (owner check). Peers take damage from OUR shots on their own client via
+      // the relayed fire event, so we never mutate a remote tank's HP here.
+      if (b.hit.indexOf(player) < 0 && bulletHitsTank(b, player) && circleHit(b, player)) {
+        damageTank(player, b.dmg); b.hit.push(player); b.pierce -= 1;
       }
       if (b.pierce <= 0) bullets.splice(bi, 1);
     }
 
-    // --- body contact: tanks vs boss + drones (rate-limited by tank.hitTimer) ---
-    var tanks2 = allTanks();
+    // --- body contact: LOCAL player vs boss + drones (rate-limited) ---
+    var tanks2 = [player];
     for (var i = 0; i < tanks2.length; i++) {
       var tk = tanks2[i];
       // vs boss
@@ -1533,6 +1571,7 @@
           b.pierce -= 1;
           if (s.hp <= 0) {
             grantXp(SHAPE_TYPES[s.type].xp * XP_MULTIPLIER);
+            player.score += SHAPE_TYPES[s.type].xp;
             shapes.splice(si, 1);
           }
           break; // at most one new shape per frame
@@ -1575,6 +1614,7 @@
 
           if (sh.hp <= 0) {
             grantXp(SHAPE_TYPES[sh.type].xp * XP_MULTIPLIER); // ram kills grant XP too
+            player.score += SHAPE_TYPES[sh.type].xp;
             shapes.splice(i, 1);
             i--;
           }
@@ -1680,41 +1720,7 @@
     }
   }
 
-  // ---- Boss / bot / drone / minimap rendering ----
-  function drawBots() {
-    for (var i = 0; i < bots.length; i++) {
-      var bt = bots[i];
-      if (!bt.alive) continue;
-      var p = worldToScreen(bt.x, bt.y);
-      if (p.x < -60 || p.x > view.w + 60 || p.y < -60 || p.y > view.h + 60) continue;
-      var col = TEAM[bt.team] || TEAM.ffa;
-      var R = ZS(bt.radius);
-      // barrel
-      ctx.save();
-      ctx.translate(p.x, p.y); ctx.rotate(bt.angle);
-      ctx.fillStyle = "#8fa3b3";
-      ctx.fillRect(0, -ZS(6), R + ZS(16), ZS(12));
-      ctx.restore();
-      // body
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, R, 0, Math.PI * 2);
-      ctx.fillStyle = col.body; ctx.fill();
-      ctx.lineWidth = 3; ctx.strokeStyle = col.stroke; ctx.stroke();
-      // nameplate
-      ctx.fillStyle = col.name;
-      ctx.font = "600 12px -apple-system, system-ui, sans-serif";
-      ctx.textAlign = "center";
-      ctx.fillText(bt.name, p.x, p.y - R - 12);
-      ctx.textAlign = "left";
-      // hp bar (only if damaged)
-      if (bt.hp < bt.maxHp) {
-        var bw = R * 2.2, ratio = Math.max(bt.hp / bt.maxHp, 0);
-        ctx.fillStyle = "rgba(0,0,0,0.4)"; ctx.fillRect(p.x - bw / 2, p.y - R - 8, bw, 5);
-        ctx.fillStyle = "#4caf50"; ctx.fillRect(p.x - bw / 2, p.y - R - 8, bw * ratio, 5);
-      }
-    }
-  }
-
+  // ---- Boss / drone / minimap rendering ----
   function drawDrones() {
     for (var i = 0; i < drones.length; i++) {
       var dr = drones[i];
@@ -2114,54 +2120,69 @@
 
   // Remote players/bullets from the multiplayer scaffold. No-ops while offline
   // (maps stay empty), so this is free in single-player.
+  // Live remote players (real friends): full tank with class barrels, team
+  // colour, nameplate, level, and HP bar.
   function drawRemotePlayers() {
-    for (var id in NET.remotePlayers) {
-      if (!NET.remotePlayers.hasOwnProperty(id)) continue;
-      var rp = NET.remotePlayers[id];
+    for (var ri = 0; ri < remotes.length; ri++) {
+      var rp = remotes[ri];
       var p = worldToScreen(rp.x, rp.y);
-      if (p.x < -40 || p.x > view.w + 40 || p.y < -40 || p.y > view.h + 40) continue;
+      if (p.x < -80 || p.x > view.w + 80 || p.y < -80 || p.y > view.h + 80) continue;
       var rcls = rp.cls && CLASSES[rp.cls] ? CLASSES[rp.cls] : null;
-      var rad = ZS(PLAYER_BASE.radius * (rcls && rcls.bodyRadiusMult ? rcls.bodyRadiusMult : 1));
-      // barrel
-      ctx.save();
-      ctx.translate(p.x, p.y);
-      ctx.rotate(rp.angle || 0);
-      ctx.fillStyle = "#9aa6ad";
-      ctx.fillRect(0, -ZS(6), rad + ZS(16), ZS(12));
-      ctx.restore();
-      // body (red-ish to distinguish enemies from the local cyan tank)
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, rad, 0, Math.PI * 2);
-      ctx.fillStyle = "#e0685c";
-      ctx.fill();
-      ctx.lineWidth = 3;
-      ctx.strokeStyle = "#a8443b";
-      ctx.stroke();
-      // name + hp bar
-      if (rp.name) {
-        ctx.fillStyle = "#fff";
-        ctx.font = "600 11px -apple-system, system-ui, sans-serif";
-        ctx.textAlign = "center";
-        ctx.fillText(rp.name, p.x, p.y - rad - 10);
-        ctx.textAlign = "left";
+      var col = TEAM[rp.team] || TEAM.ffa;
+      var R = ZS(rp.radius || PLAYER_BASE.radius);
+      // barrels (from the class pattern) or rammer spike ring
+      if (rcls && rcls.rammer) {
+        ctx.save(); ctx.translate(p.x, p.y);
+        ctx.beginPath();
+        var spikes = rcls.spikes || 6, rO = R + ZS(7);
+        for (var s = 0; s < spikes; s++) { var a2 = (s / spikes) * Math.PI * 2; var sx = Math.cos(a2) * rO, sy = Math.sin(a2) * rO; if (s === 0) ctx.moveTo(sx, sy); else ctx.lineTo(sx, sy); }
+        ctx.closePath(); ctx.fillStyle = "#6f4a94"; ctx.fill(); ctx.restore();
+      } else {
+        var barrels = rcls ? rcls.barrels : DEFAULT_BARRELS;
+        ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(rp.a || 0);
+        ctx.fillStyle = "#8fa3b3";
+        for (var bi2 = 0; bi2 < barrels.length; bi2++) {
+          var br = barrels[bi2];
+          ctx.save(); ctx.rotate(br.a || 0);
+          ctx.fillRect(0, ZS(br.off || 0) - ZS(14 * (br.w || 1)) / 2, ZS((PLAYER_BASE.radius + 18) * (br.len || 1)), ZS(14 * (br.w || 1)));
+          ctx.restore();
+        }
+        ctx.restore();
       }
+      // body
+      ctx.beginPath(); ctx.arc(p.x, p.y, R, 0, Math.PI * 2);
+      ctx.fillStyle = rcls && rcls.rammer ? "#b06fd6" : col.body; ctx.fill();
+      ctx.lineWidth = 3; ctx.strokeStyle = col.stroke; ctx.stroke();
+      // HP bar
+      if (rp.hp !== undefined && rp.maxHp) {
+        var bw = R * 2.2, ratio = Math.max(rp.hp / rp.maxHp, 0);
+        ctx.fillStyle = "rgba(0,0,0,0.4)"; ctx.fillRect(p.x - bw / 2, p.y - R - 12, bw, 5);
+        ctx.fillStyle = "#4caf50"; ctx.fillRect(p.x - bw / 2, p.y - R - 12, bw * ratio, 5);
+      }
+      // nameplate (+ level)
+      ctx.fillStyle = col.name;
+      ctx.font = "700 13px -apple-system, system-ui, sans-serif";
+      ctx.textAlign = "center";
+      ctx.fillText((rp.name || "player") + "  ·  Lv" + (rp.level || 1), p.x, p.y - R - 20);
+      ctx.textAlign = "left";
     }
   }
 
   function drawRemoteBullets() {
-    ctx.fillStyle = "#ffd0c0";
-    for (var i = 0; i < NET.remoteBullets.length; i++) {
-      var b = NET.remoteBullets[i];
+    for (var i = 0; i < remoteBullets.length; i++) {
+      var b = remoteBullets[i];
       var p = worldToScreen(b.x, b.y);
+      if (p.x < -40 || p.x > view.w + 40 || p.y < -40 || p.y > view.h + 40) continue;
       ctx.beginPath();
-      ctx.arc(p.x, p.y, ZS(b.r || 6), 0, Math.PI * 2);
+      ctx.arc(p.x, p.y, ZS(b.radius || 6), 0, Math.PI * 2);
+      ctx.fillStyle = b.color || "#ffd0c0";
       ctx.fill();
     }
   }
 
   // Top-right minimap: scales the 6000² world into a small square, honoring the
-  // notch safe area. Shows the player, bots (team-coloured), and a pulsing skull
-  // at the boss.
+  // notch safe area. Shows the player, remote players (team-coloured), and a
+  // pulsing skull at the boss.
   function getMinimapRect() {
     var size = Math.min(140, view.w * 0.28);
     return { x: view.w - size - 12 - safe.right, y: 12 + safe.top, w: size, h: size };
@@ -2185,11 +2206,11 @@
     ctx.lineWidth = 2; ctx.strokeStyle = "rgba(255,255,255,0.25)";
     ctx.strokeRect(m.x, m.y, m.w, m.h);
     var sx = m.w / WORLD.w, sy = m.h / WORLD.h;
-    // bots
-    for (var i = 0; i < bots.length; i++) {
-      var bt = bots[i]; if (!bt.alive) continue;
-      ctx.fillStyle = (TEAM[bt.team] || TEAM.ffa).body;
-      ctx.beginPath(); ctx.arc(m.x + bt.x * sx, m.y + bt.y * sy, 2.5, 0, Math.PI * 2); ctx.fill();
+    // remote players (real friends), colour-coded by team
+    for (var i = 0; i < remotes.length; i++) {
+      var rp = remotes[i];
+      ctx.fillStyle = (TEAM[rp.team] || TEAM.ffa).body;
+      ctx.beginPath(); ctx.arc(m.x + rp.x * sx, m.y + rp.y * sy, 3, 0, Math.PI * 2); ctx.fill();
     }
     // player
     ctx.fillStyle = gameMode === "teams" ? (TEAM[player.team] || TEAM.ffa).name : "#ffffff";
@@ -2239,6 +2260,29 @@
     ctx.globalAlpha = 1;
   }
 
+  // Live scoreboard (top-centre): local player + connected friends, by score.
+  function drawLeaderboard() {
+    if (!NET.connected && remotes.length === 0) return; // solo -> skip
+    var list = [{ name: player.name, score: player.score || 0, team: player.team, me: true }];
+    for (var i = 0; i < remotes.length; i++) {
+      list.push({ name: remotes[i].name, score: remotes[i].score || 0, team: remotes[i].team });
+    }
+    list.sort(function (a, b) { return b.score - a.score; });
+    var rows = Math.min(list.length, 6);
+    var x = view.w / 2, y = safe.top + 30;
+    ctx.textAlign = "center";
+    ctx.font = "700 12px -apple-system, system-ui, sans-serif";
+    ctx.fillStyle = "rgba(255,255,255,0.55)";
+    ctx.fillText(NET.connected ? "PLAYERS ONLINE" : "SCORE", x, y);
+    for (var r = 0; r < rows; r++) {
+      var e = list[r];
+      ctx.fillStyle = (TEAM[e.team] || TEAM.ffa).name;
+      ctx.font = (e.me ? "800 " : "600 ") + "13px -apple-system, system-ui, sans-serif";
+      ctx.fillText((e.name || "player") + "  " + e.score, x, y + 16 + r * 16);
+    }
+    ctx.textAlign = "left";
+  }
+
   function render() {
     ctx.clearRect(0, 0, view.w, view.h);
     ctx.fillStyle = "#12141a";
@@ -2250,7 +2294,6 @@
     drawRemoteBullets();
     drawBullets();
     drawDrones();
-    drawBots();
     drawRemotePlayers();
     drawBoss();
     drawPlayer();
@@ -2259,6 +2302,7 @@
     drawMinimap();
     drawBossHealthBar();
     drawBossWarning();
+    drawLeaderboard();
     drawNotif();
 
     // In-game touch controls / HUD only while actually playing.
@@ -2284,16 +2328,17 @@
     lastTime = now;
 
     updatePlayer(dt);
-    updateBots(dt);
     updateBoss(dt);
     updateDrones(dt);
     updateBullets(dt);
     updateShapes(dt);
+    updateRemotes(dt);        // interpolate remote players toward server state
+    updateRemoteBullets(dt);  // peers' shots (damage the local player)
     checkCollisions();
     checkCombat(dt);
     updateCamera(dt);
     if (notif.timer > 0) notif.timer -= dt;
-    NET.update(dt); // push local state to the server (no-op while offline)
+    NET.update(dt);           // sync our state to the server (no-op while solo)
 
     render();
 
@@ -2305,41 +2350,23 @@
   // ======================================================================
   var lobbyEl = document.getElementById("lobby");
   var modeSel = document.getElementById("modeSel");
-  var regionSel = document.getElementById("regionSel");
   var teamRow = document.getElementById("teamRow");
   var teamWarn = document.getElementById("teamWarn");
   var nameInput = document.getElementById("nameInput");
   var playBtn = document.getElementById("playBtn");
   var lobbyTeamChoice = "red";
 
-  // Count how bots WOULD split so we can lock the overpopulated side for balance.
-  function teamCounts() {
-    var red = 0, blue = 0;
-    for (var i = 0; i < NUM_BOTS; i++) { if (i % 2 === 0) red++; else blue++; }
-    return { red: red, blue: blue };
-  }
+  // Team picker: show only in 2 Teams mode. Actual balancing is done by the
+  // server on join (it may reassign you to the smaller side — see NET welcome).
   function refreshTeamUI() {
     var teams = gameMode === "teams";
     teamRow.style.display = teams ? "flex" : "none";
-    teamWarn.textContent = "";
+    teamWarn.textContent = teams ? "Server auto-balances teams on join." : "";
     if (!teams) return;
-    var c = teamCounts();
-    // Include the player's provisional pick when judging balance.
-    var redTotal = c.red + (lobbyTeamChoice === "red" ? 1 : 0);
-    var blueTotal = c.blue + (lobbyTeamChoice === "blue" ? 1 : 0);
     var btns = teamRow.querySelectorAll(".teamBtn");
     for (var i = 0; i < btns.length; i++) {
       var t = btns[i].getAttribute("data-team");
-      // Lock a side if picking it would make it outnumber the other.
-      var wouldRed = c.red + (t === "red" ? 1 : 0);
-      var wouldBlue = c.blue + (t === "blue" ? 1 : 0);
-      var locked = (t === "red" && wouldRed > wouldBlue + 1) || (t === "blue" && wouldBlue > wouldRed + 1);
-      btns[i].classList.toggle("locked", locked);
-      btns[i].classList.toggle("selected", lobbyTeamChoice === t && !locked);
-      btns[i].disabled = locked;
-      if (locked && lobbyTeamChoice === t) {
-        teamWarn.textContent = "Team Full - Joining Locked for Balance";
-      }
+      btns[i].classList.toggle("selected", lobbyTeamChoice === t);
     }
   }
   modeSel.addEventListener("change", function () {
@@ -2348,7 +2375,7 @@
   });
   teamRow.addEventListener("click", function (e) {
     var btn = e.target.closest ? e.target.closest(".teamBtn") : null;
-    if (!btn || btn.disabled) return;
+    if (!btn) return;
     lobbyTeamChoice = btn.getAttribute("data-team");
     refreshTeamUI();
   });
@@ -2356,17 +2383,17 @@
     playerName = (nameInput.value || "").trim().slice(0, 16) || "mango";
     gameMode = modeSel.value === "teams" ? "teams" : "ffa";
     playerTeam = gameMode === "teams" ? lobbyTeamChoice : "ffa";
-    // Fresh player with the chosen identity, and bots split for the mode.
+    // Fresh player with the chosen identity.
     Object.assign(player, makePlayer());
-    initBots();
     bossTimer = BOSS_INTERVAL; boss = null; drones = []; bossWarningActive = false;
+    remotes = []; remoteBullets = [];
     notif = { text: "", timer: 0 };
     gameState = "playing";
     lobbyEl.classList.add("hidden");
+    NET.start(); // connect to the multiplayer server (no-op if URL not configured)
   }
   playBtn.addEventListener("click", startGame);
   refreshTeamUI();
-  initBots(); // populate the arena so the lobby background is lively
 
   requestAnimationFrame(frame);
 })();
