@@ -1,0 +1,2527 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<!--
+  viewport-fit=cover + user-scalable=no keep the page from zooming/scrolling
+  on mobile so touch drags always control the joysticks, never the browser.
+  viewport-fit=cover is also what exposes the safe-area-inset env() values
+  used below (notch/home-indicator padding on iPhones).
+-->
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, minimum-scale=1, user-scalable=no, viewport-fit=cover">
+<!-- iOS standalone / WebView hints -->
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="mobile-web-app-capable" content="yes">
+<title>Tank Arena</title>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    /* position:fixed on both is the reliable way to kill iOS Safari's
+       rubber-band / bounce scrolling, which overflow:hidden alone doesn't. */
+    position: fixed;
+    top: 0;
+    left: 0;
+    overflow: hidden;
+    background: #12141a;
+    touch-action: none;                    /* no OS pan/zoom from drags */
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-touch-callout: none;           /* no long-press callout on iOS */
+    -webkit-tap-highlight-color: transparent;
+    overscroll-behavior: none;
+  }
+  #game {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    display: block;
+    touch-action: none;
+  }
+  /* Hidden probe: its padding resolves the safe-area-inset env() values so JS
+     can read them via getComputedStyle (canvas can't read env() directly). */
+  #safeprobe {
+    position: fixed;
+    top: 0; left: 0;
+    width: 0; height: 0;
+    padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+    visibility: hidden;
+    pointer-events: none;
+  }
+  /* Simple "rotate device" hint shown only in narrow portrait phone widths.
+     Gameplay still works in portrait (see Section 1 of the JS), this is
+     just a nudge toward the preferred landscape orientation. */
+  #rotateHint {
+    position: fixed;
+    inset: 0;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    background: rgba(10,10,14,0.92);
+    color: #fff;
+    font: 600 18px/1.4 -apple-system, system-ui, sans-serif;
+    text-align: center;
+    z-index: 50;
+    pointer-events: none;
+    padding: 24px;
+  }
+  @media (max-width: 600px) and (orientation: portrait) {
+    #rotateHint { display: flex; }
+  }
+
+  /* ---- Main-menu lobby (Diep.io style) ---- */
+  #lobby {
+    position: fixed; inset: 0; z-index: 40;
+    display: flex; align-items: center; justify-content: center;
+    padding: calc(16px + env(safe-area-inset-top)) 16px calc(16px + env(safe-area-inset-bottom));
+    background: rgba(12,16,24,0.45);
+    -webkit-backdrop-filter: blur(3px); backdrop-filter: blur(3px);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  }
+  #lobby.hidden { display: none; }
+  .lobbyCard {
+    width: min(420px, 92vw);
+    background: rgba(20,26,38,0.92);
+    border: 3px solid rgba(255,255,255,0.14);
+    border-radius: 16px;
+    padding: 20px 20px 22px;
+    box-shadow: 0 18px 60px rgba(0,0,0,0.5);
+    text-align: center;
+  }
+  .lobbyTitle {
+    font-size: clamp(28px, 7vw, 44px); font-weight: 800; margin: 2px 0 16px;
+    background: linear-gradient(90deg,#3fb6f0,#b06fd6);
+    -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
+  }
+  .lobbyRow { display: flex; gap: 10px; margin-bottom: 12px; }
+  .lobbyRow > * { flex: 1; }
+  #lobby select, #lobby input {
+    width: 100%; box-sizing: border-box;
+    font-size: 16px; padding: 12px 12px; border-radius: 10px;
+    border: 2px solid rgba(255,255,255,0.16);
+    background: #2a3446; color: #eef2f6; outline: none;
+    -webkit-appearance: none; appearance: none;
+  }
+  #nameInput {
+    background: #ffffff; color: #12141a; font-weight: 700; text-align: center;
+    font-size: 20px; padding: 14px; margin-bottom: 14px; border-color: #cfd6de;
+  }
+  #teamRow { gap: 10px; }
+  .teamBtn {
+    font-size: 15px; font-weight: 700; padding: 12px; border-radius: 10px;
+    border: 2px solid transparent; color: #fff; cursor: pointer;
+  }
+  .teamBtn.red { background: #c34a44; }
+  .teamBtn.blue { background: #3f78c4; }
+  .teamBtn.selected { border-color: #ffffff; box-shadow: 0 0 0 2px rgba(255,255,255,0.35) inset; }
+  .teamBtn.locked { opacity: 0.4; cursor: not-allowed; }
+  #teamWarn { color: #ffcf5a; font-size: 12px; font-weight: 700; min-height: 15px; margin: -4px 0 10px; }
+  #playBtn {
+    width: 100%; font-size: 22px; font-weight: 800; letter-spacing: 0.5px;
+    padding: 15px; border: 0; border-radius: 12px; cursor: pointer;
+    color: #fff; background: linear-gradient(180deg,#4aa6f0,#2f7fd6);
+    box-shadow: 0 6px 0 #235e9e; transition: transform 0.05s ease;
+  }
+  #playBtn:active { transform: translateY(3px); box-shadow: 0 3px 0 #235e9e; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<div id="safeprobe"></div>
+<div id="rotateHint">Rotate your device to landscape<br>for the best experience</div>
+
+<!-- Main-menu lobby overlay (hidden once the player presses Play). The live
+     game (grid + wandering shapes/bots) renders behind the blurred backdrop. -->
+<div id="lobby">
+  <div class="lobbyCard">
+    <div class="lobbyTitle">TANK ARENA</div>
+    <div class="lobbyRow">
+      <select id="modeSel" aria-label="Game mode">
+        <option value="ffa">FFA</option>
+        <option value="teams">2 Teams</option>
+        <option value="sandbox">Sandbox</option>
+      </select>
+    </div>
+    <div id="teamRow" class="lobbyRow" style="display:none;">
+      <button type="button" class="teamBtn red" data-team="red">Red Team</button>
+      <button type="button" class="teamBtn blue" data-team="blue">Blue Team</button>
+    </div>
+    <div id="teamWarn"></div>
+    <input id="nameInput" type="text" placeholder="mango" maxlength="16" autocomplete="off" spellcheck="false">
+    <button id="playBtn" type="button">Play!</button>
+  </div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  // ======================================================================
+  // 1. CANVAS SETUP + RESPONSIVE SCALING
+  //    The backing store is sized in real device pixels (capped at 2x DPR
+  //    so huge canvases don't tank fill-rate on low-end phones) while CSS
+  //    keeps the element itself filling the viewport. Everything else in
+  //    the game reads logical size from `view.w` / `view.h`.
+  // ======================================================================
+  var canvas = document.getElementById("game");
+  var ctx = canvas.getContext("2d");
+  var safeprobe = document.getElementById("safeprobe");
+
+  var view = { w: 0, h: 0, dpr: 1 };
+  // Safe-area insets (notch / home indicator). Read from #safeprobe's resolved
+  // env() padding so HUD/controls don't hide under iPhone hardware cutouts.
+  var safe = { top: 0, right: 0, bottom: 0, left: 0 };
+
+  function readSafeInsets() {
+    var cs = getComputedStyle(safeprobe);
+    safe.top = parseFloat(cs.paddingTop) || 0;
+    safe.right = parseFloat(cs.paddingRight) || 0;
+    safe.bottom = parseFloat(cs.paddingBottom) || 0;
+    safe.left = parseFloat(cs.paddingLeft) || 0;
+  }
+
+  function resize() {
+    var dpr = Math.min(window.devicePixelRatio || 1, 2);
+    var w = window.innerWidth;
+    var h = window.innerHeight;
+    view.w = w;
+    view.h = h;
+    view.dpr = dpr;
+    canvas.width = Math.round(w * dpr);
+    canvas.height = Math.round(h * dpr);
+    canvas.style.width = w + "px";
+    canvas.style.height = h + "px";
+    // Draw in logical (CSS) pixels; the transform handles the DPR scaling.
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    readSafeInsets();
+  }
+  window.addEventListener("resize", resize);
+  window.addEventListener("orientationchange", resize);
+  resize();
+
+  // --- iOS Safari / WebView gesture hardening ---
+  // touch-action:none + preventDefault on touch events blocks most gestures,
+  // but iOS pinch-zoom fires gesture* events and double-tap-zoom needs its own
+  // guard, so suppress those explicitly.
+  ["gesturestart", "gesturechange", "gestureend"].forEach(function (evt) {
+    document.addEventListener(evt, function (e) { e.preventDefault(); }, { passive: false });
+  });
+  document.addEventListener("dblclick", function (e) { e.preventDefault(); }, { passive: false });
+  // Double-tap zoom guard: swallow a 2nd tap that lands within 300ms of the last.
+  var lastTouchEndTime = 0;
+  document.addEventListener("touchend", function (e) {
+    var now = Date.now();
+    if (now - lastTouchEndTime <= 300) e.preventDefault();
+    lastTouchEndTime = now;
+  }, { passive: false });
+
+  // ======================================================================
+  // 2. WORLD / CONFIG CONSTANTS
+  // ======================================================================
+  // Bigger world for more room to roam (was 3000x3000).
+  var WORLD = { w: 6000, h: 6000 };
+  var GRID_SIZE = 100;
+
+  // ---- Real-time online multiplayer ----
+  // Point this at your deployed server.js (see the repo's server.js + README).
+  // Use a "wss://" URL for HTTPS/APK contexts. You can also override it at
+  // runtime with window.TANK_NET_URL. Until it's set to a real server the game
+  // runs solo (you + shapes + bosses); once set, real friends appear live.
+  var MULTIPLAYER_URL = "wss://REPLACE-WITH-YOUR-SERVER.onrender.com";
+
+  // ---- Game state / lobby / teams ----
+  var MAX_LEVEL = 45;                 // diep.io hard level cap
+  var gameState = "lobby";            // "lobby" while the menu is up, "playing" after Play!
+  var gameMode = "ffa";               // "ffa" | "teams"
+  var playerTeam = "ffa";             // "ffa" | "red" | "blue"
+  var playerName = "mango";
+  var TEAM = {
+    red:  { body: "#e05353", stroke: "#a8443b", bullet: "#f08a84", name: "#ff9a92" },
+    blue: { body: "#4d8fe0", stroke: "#2a6bb0", bullet: "#8fbdf0", name: "#9cc4ff" },
+    ffa:  { body: "#3fb6f0", stroke: "#2a86ad", bullet: "#f2f2f2", name: "#ffffff" }
+  };
+  // No AI bots — this is real-time online multiplayer; other tanks are REAL
+  // players synced over the network (see NET). Kept at 0 so nothing local
+  // "mimics" players.
+  var NUM_BOTS = 0;
+
+  // ---- Mythical Boss System ----
+  var BOSS_INTERVAL = 600;            // seconds between boss spawns (exactly 10 minutes)
+  var BOSS_WARNING = 10;              // seconds of on-screen warning before the spawn
+  var BOSS_LEVEL_REWARD = 10;         // levels granted for the kill (capped at MAX_LEVEL)
+  var BOSS_MAX_DRONES = 30;           // Summoner Core drone cap
+  var BOSS_NEAR_DIST = 1400;          // show the giant boss health bar within this range
+  var BOSS_TYPES = {
+    polygon_king: {
+      name: "Polygon King", color: "#8e5bd0", stroke: "#5f3a94", sides: 5,
+      radius: 120, hp: 9000, contact: 40, reload: 0.55,
+      bulletDmg: 34, bulletSpeed: 380, bulletR: 13, barrels: 5, radial: true
+    },
+    summoner_core: {
+      name: "Summoner Core", color: "#e0c740", stroke: "#a8912a", sides: 4,
+      radius: 115, hp: 8000, contact: 34, summon: true
+    },
+    giga_smasher: {
+      name: "Giga Smasher", color: "#9aa6ad", stroke: "#5c6672", sides: 0,
+      radius: 130, hp: 11000, contact: 60, rammer: true, spikes: 10,
+      baseSpeed: 90, rageSpeed: 320, knockbackResist: 0.9
+    },
+    omega_dreadnought: {
+      name: "Omega Dreadnought", color: "#4caf6a", stroke: "#2f7a46", sides: 3,
+      radius: 125, hp: 10000, contact: 44, reload: 3.2,
+      bulletDmg: 100000, bulletSpeed: 300, bulletR: 34, rearTurrets: true,
+      turretReload: 0.6, turretDmg: 20, turretBulletR: 8, turretSpeed: 360
+    }
+  };
+  var BOSS_ORDER = ["polygon_king", "summoner_core", "giga_smasher", "omega_dreadnought"];
+
+  var PLAYER_BASE = {
+    radius: 22,
+    maxHp: 100,
+    accel: 900,      // px/s^2 - how fast the tank speeds up
+    friction: 6,      // higher = stops quicker when joystick released
+    maxSpeed: 260,
+    fireCooldown: 0.42,  // slow base attack speed at L1; the Reload stat scales it up
+    bulletDamage: 12,
+    bulletSpeed: 620,
+    bulletRadius: 7,
+    bulletLife: 0.9,
+    contactDamage: 10, // ram damage the PLAYER takes per collision tick
+    bodyDamage: 20,    // ram damage the player DEALS to a shape per collision tick
+    hitCooldown: 0.5   // per-collision tick: both invuln window AND ram-damage cadence
+  };
+
+  // --- Skill-point upgrade system (8 standard Diep.io stats) ---
+  // Each stat can be leveled up to the player's tier cap (8, or 10 for the
+  // Smasher line) by spending skill points earned one-per-level-up. The 8 defs
+  // below drive both the touch upgrade menu and recomputeStats().
+  var BASE_MAX_TIER = 8;    // default cap; Smasher line raises it to 10 (class.maxTier)
+  var UPGRADES = [
+    { key: "regen",     label: "Health Regen",    color: "#7fd68a" },
+    { key: "maxhp",     label: "Max Health",      color: "#4d8fe0" },
+    { key: "body",      label: "Body Damage",     color: "#e0873a" },
+    { key: "bulletspd", label: "Bullet Speed",    color: "#5fc9d6" },
+    { key: "pen",       label: "Bullet Penetr.",  color: "#c58cf0" },
+    { key: "damage",    label: "Bullet Damage",   color: "#e05353" },
+    { key: "reload",    label: "Reload",          color: "#f2c14e" },
+    { key: "movement",  label: "Movement Speed",  color: "#4caf50" }
+  ];
+
+  // --- Health regeneration ---
+  // Regen rate scales with the Health Regen stat (see recomputeStats ->
+  // p.regenFrac). REGEN_DELAY is the idle time before regen kicks in.
+  var REGEN_DELAY = 4;   // seconds without taking damage before regen kicks in
+  var RECOIL_UNIT = 9;   // velocity impulse (px/s) per shot, x class.recoil
+
+  // Base shape XP is multiplied by this at grant time (single knob for tuning
+  // farm speed without touching the per-shape numbers below).
+  var XP_MULTIPLIER = 4;
+
+  // Shapes are tankier now (hp roughly doubled) to balance the faster XP farm,
+  // with XP bumped to keep kills rewarding despite the extra effort.
+  var SHAPE_TYPES = {
+    triangle: { sides: 3, hp: 32,  xp: 16, radius: 16, color: "#e05353", rot: 1.6 },
+    square:   { sides: 4, hp: 90,  xp: 34, radius: 20, color: "#e0c740", rot: 0.9 },
+    pentagon: { sides: 5, hp: 260, xp: 95, radius: 30, color: "#4d8fe0", rot: 0.5 }
+  };
+  // Far more shapes on the (now larger) map, and a much faster top-up so the
+  // world stays dense and action-packed.
+  var MAX_SHAPES = 260;
+  var SHAPE_RESPAWN_INTERVAL = 0.25; // seconds between respawn batches while under cap
+  var SHAPE_RESPAWN_BATCH = 4;       // shapes added per respawn batch
+
+  var CAMERA_SMOOTH = 4.5; // higher = snappier follow, lower = laggier/smoother
+
+  // --- Deep class evolution tree (authentic Diep.io branches) ---
+  // Evolve at each level in EVOLVE_LEVELS: L15 picks a base class, L30 and L45
+  // pick from that class's `upgrades`. The Smasher branch is special — you stay
+  // a Basic Tank at 15 (the "basic" node) and become a Smasher at 30.
+  //
+  // Classes are DATA-DRIVEN. Firing and barrel rendering both read `barrels`:
+  //   barrels: [ { a, off, len, w, cone, rMult, dMult, sMult }, ... ]
+  //     a     = angle offset from the turret aim (rad); 0 = straight forward
+  //     off   = lateral offset in px (side-by-side barrels, e.g. Twin)
+  //     len/w = barrel length / width multipliers (x base radius+18 / 14px)
+  //     cone  = draw a widening trapezoid (Machine Gun)
+  //     rMult/dMult/sMult = per-barrel bullet radius / damage / speed multipliers
+  //                         (Hunter's one large + one small trailing bullet)
+  // Class-level multipliers (all default 1 when omitted):
+  //   reloadMult damageMult speedMult inaccuracy bulletRadiusMult bulletLifeMult
+  //   moveSpeedMult bodyMult hpMult bodyRadiusMult
+  // Other class flags: viewMult (zoom-out / bigger viewport), recoil (fire kick),
+  //   invisible (fade when idle), rammer + spikes + knockbackResist (Smasher),
+  //   auto + autoCount (independent auto-aim turret(s)), maxTier (raise stat cap).
+  var EVOLVE_LEVELS = [15, 30, 45];
+  var PI = Math.PI;
+  var DEFAULT_BARRELS = [{ a: 0, off: 0, len: 1, w: 1 }]; // Basic Tank barrel
+
+  // Spread Shot: 11 small fan barrels from -0.6 to 0.6 rad.
+  var SPREAD_BARRELS = (function () {
+    var arr = [];
+    for (var i = 0; i < 11; i++) {
+      var t = i / 10; // 0..1
+      arr.push({ a: -0.6 + t * 1.2, len: 0.7 + 0.35 * (1 - Math.abs(t - 0.5) * 2), w: 0.5 });
+    }
+    return arr;
+  })();
+  // Eight radial barrels (Octo Tank / Octo Flank).
+  var OCTO_BARRELS = [0, PI / 4, PI / 2, 3 * PI / 4, PI, -3 * PI / 4, -PI / 2, -PI / 4]
+    .map(function (a) { return { a: a, len: 1, w: 0.95 }; });
+
+  var CLASSES = {
+    // ================= Tier 2 (Level 15) =================
+    twin: {
+      label: "Twin", color: "#4caf50", desc: "Two parallel front barrels",
+      barrels: [{ a: 0, off: 9, w: 0.85 }, { a: 0, off: -9, w: 0.85 }],
+      upgrades: ["tripleshot", "twinflank"]
+    },
+    sniper: {
+      label: "Sniper", color: "#e05353", desc: "Long thin barrel: high damage & bullet speed, slow reload, wider view",
+      barrels: [{ a: 0, len: 1.7, w: 0.7 }],
+      reloadMult: 1.7, damageMult: 1.9, speedMult: 1.6, viewMult: 1.22,
+      upgrades: ["assassin", "hunter"]
+    },
+    machinegun: {
+      label: "Machine Gun", color: "#f2c14e", desc: "Wide cone barrel: fast reload, wide low-accuracy spread",
+      barrels: [{ a: 0, len: 0.85, w: 1.7, cone: true }],
+      reloadMult: 0.55, damageMult: 0.8, inaccuracy: 0.2,
+      upgrades: ["destroyer", "gunner"]
+    },
+    flank: {
+      label: "Flank Guard", color: "#4d8fe0", desc: "One front barrel, one smaller rear barrel",
+      barrels: [{ a: 0, len: 1, w: 1 }, { a: PI, len: 0.8, w: 0.85 }],
+      upgrades: ["triangle", "quad"]
+    },
+    basic: {
+      label: "Rammer Path", color: "#9aa6ad", desc: "Stay a Basic Tank now — evolve to Smasher at Level 30",
+      barrels: DEFAULT_BARRELS,
+      upgrades: ["smasher"]
+    },
+
+    // ================= Tier 3 (Level 30) =================
+    // -- Twin branch --
+    tripleshot: {
+      label: "Triple Shot", color: "#4caf50", desc: "Three wide-angled fan barrels",
+      barrels: [{ a: -0.35, w: 0.85 }, { a: 0, w: 0.85 }, { a: 0.35, w: 0.85 }],
+      upgrades: ["pentashot", "spreadshot"]
+    },
+    twinflank: {
+      label: "Twin Flank", color: "#4caf50", desc: "Twin barrels front, twin barrels rear",
+      barrels: [{ a: 0, off: 9, w: 0.85 }, { a: 0, off: -9, w: 0.85 },
+                { a: PI, off: 9, w: 0.85 }, { a: PI, off: -9, w: 0.85 }],
+      upgrades: ["tripletwin"]
+    },
+    // -- Sniper branch --
+    assassin: {
+      label: "Assassin", color: "#e05353", desc: "Longer barrel, higher bullet speed, wider viewport",
+      barrels: [{ a: 0, len: 2.0, w: 0.65 }],
+      reloadMult: 2.0, damageMult: 2.3, speedMult: 2.0, viewMult: 1.4,
+      upgrades: ["ranger", "stalker"]
+    },
+    hunter: {
+      label: "Hunter", color: "#e05353", desc: "Two stacked barrels: one large bullet + one small trailing bullet",
+      barrels: [{ a: 0, len: 1.7, w: 1.05, rMult: 1.7, dMult: 1.4, sMult: 0.9 },
+                { a: 0, len: 2.0, w: 0.5, rMult: 0.55, sMult: 1.3 }],
+      reloadMult: 1.6, damageMult: 1.6, speedMult: 1.6, viewMult: 1.18,
+      upgrades: ["streamliner"]
+    },
+    // -- Machine Gun branch --
+    destroyer: {
+      label: "Destroyer", color: "#f2c14e", desc: "One massive high-damage bullet, huge recoil, ultra-slow reload",
+      barrels: [{ a: 0, len: 1.1, w: 2.4 }],
+      reloadMult: 3.4, damageMult: 3.4, speedMult: 0.85, bulletRadiusMult: 2.8, bulletLifeMult: 1.3, recoil: 2.5,
+      upgrades: ["hybrid", "annihilator"]
+    },
+    gunner: {
+      label: "Gunner", color: "#f2c14e", desc: "Four tiny barrels firing high-frequency micro-bullets",
+      barrels: [{ a: 0, off: 6, len: 0.75, w: 0.5 }, { a: 0, off: -6, len: 0.75, w: 0.5 },
+                { a: 0, off: 15, len: 0.6, w: 0.45 }, { a: 0, off: -15, len: 0.6, w: 0.45 }],
+      reloadMult: 0.3, damageMult: 0.5, inaccuracy: 0.07,
+      upgrades: ["autogunner"]
+    },
+    // -- Flank branch --
+    triangle: {
+      label: "Tri-Angle", color: "#4d8fe0", desc: "Front barrel + two rear thrusters — immense speed from recoil",
+      barrels: [{ a: 0, len: 1, w: 1 }, { a: PI * 0.8, len: 0.9, w: 0.85 }, { a: -PI * 0.8, len: 0.9, w: 0.85 }],
+      moveSpeedMult: 1.2, recoil: 1.3,
+      upgrades: ["booster", "fighter"]
+    },
+    quad: {
+      label: "Quad Tank", color: "#4d8fe0", desc: "Four perpendicular cross barrels",
+      barrels: [{ a: 0 }, { a: PI / 2 }, { a: PI }, { a: -PI / 2 }],
+      upgrades: ["octotank"]
+    },
+    // -- Smasher branch (from Basic at 30) --
+    smasher: {
+      label: "Smasher", color: "#b06fd6", desc: "No guns, bigger body, more speed & body damage, stat cap raised to 10",
+      rammer: true, spikes: 6, bodyMult: 2.6, hpMult: 1.7, moveSpeedMult: 1.3, bodyRadiusMult: 1.4, maxTier: 10,
+      upgrades: ["auto_smasher", "spike"]
+    },
+
+    // ================= Tier 4 (Level 45) =================
+    // -- Twin branch --
+    pentashot: {
+      label: "Penta Shot", color: "#4caf50", desc: "Five front-facing fan barrels",
+      barrels: [{ a: -0.4, w: 0.8 }, { a: -0.2, w: 0.8 }, { a: 0, w: 0.8 }, { a: 0.2, w: 0.8 }, { a: 0.4, w: 0.8 }],
+      upgrades: []
+    },
+    spreadshot: {
+      label: "Spread Shot", color: "#4caf50", desc: "Eleven small fan barrels blanketing the front",
+      barrels: SPREAD_BARRELS,
+      reloadMult: 1.15, damageMult: 0.6,
+      upgrades: []
+    },
+    tripletwin: {
+      label: "Triple Twin", color: "#4caf50", desc: "Three pairs of twin barrels aimed in three directions",
+      barrels: [{ a: 0, off: 8, w: 0.8 }, { a: 0, off: -8, w: 0.8 },
+                { a: 2 * PI / 3, off: 8, w: 0.8 }, { a: 2 * PI / 3, off: -8, w: 0.8 },
+                { a: -2 * PI / 3, off: 8, w: 0.8 }, { a: -2 * PI / 3, off: -8, w: 0.8 }],
+      upgrades: []
+    },
+    // -- Sniper branch --
+    ranger: {
+      label: "Ranger", color: "#e05353", desc: "Maximum viewport and extreme bullet speed",
+      barrels: [{ a: 0, len: 2.4, w: 0.6 }],
+      reloadMult: 2.2, damageMult: 2.6, speedMult: 2.6, viewMult: 1.7,
+      upgrades: []
+    },
+    stalker: {
+      label: "Stalker", color: "#e05353", desc: "Turns invisible while standing still",
+      barrels: [{ a: 0, len: 2.1, w: 0.62 }],
+      reloadMult: 1.9, damageMult: 2.4, speedMult: 2.2, viewMult: 1.45, invisible: true,
+      upgrades: []
+    },
+    streamliner: {
+      label: "Streamliner", color: "#e05353", desc: "Five stacked linear barrels firing ultra-fast micro-bullets",
+      barrels: [{ a: 0, len: 1.7, w: 0.5, rMult: 0.55 }, { a: 0, len: 1.5, w: 0.5, rMult: 0.55 },
+                { a: 0, len: 1.3, w: 0.5, rMult: 0.55 }, { a: 0, len: 1.1, w: 0.5, rMult: 0.55 },
+                { a: 0, len: 0.9, w: 0.5, rMult: 0.55 }],
+      reloadMult: 0.28, damageMult: 0.5, speedMult: 1.5, viewMult: 1.1,
+      upgrades: []
+    },
+    // -- Machine Gun branch --
+    hybrid: {
+      label: "Hybrid", color: "#f2c14e", desc: "Massive bullet plus two auto-spawning helper drones",
+      barrels: [{ a: 0, len: 1.1, w: 2.4 }],
+      reloadMult: 3.4, damageMult: 3.2, speedMult: 0.85, bulletRadiusMult: 2.8, bulletLifeMult: 1.3, recoil: 2.2,
+      auto: true, autoCount: 2,
+      upgrades: []
+    },
+    annihilator: {
+      label: "Annihilator", color: "#f2c14e", desc: "Even larger bullet with maximum recoil",
+      barrels: [{ a: 0, len: 1.15, w: 3.0 }],
+      reloadMult: 3.8, damageMult: 4.6, speedMult: 0.8, bulletRadiusMult: 3.6, bulletLifeMult: 1.4, recoil: 3.6,
+      upgrades: []
+    },
+    autogunner: {
+      label: "Auto Gunner", color: "#f2c14e", desc: "Four tiny barrels plus one independent auto-turret",
+      barrels: [{ a: 0, off: 6, len: 0.75, w: 0.5 }, { a: 0, off: -6, len: 0.75, w: 0.5 },
+                { a: 0, off: 15, len: 0.6, w: 0.45 }, { a: 0, off: -15, len: 0.6, w: 0.45 }],
+      reloadMult: 0.3, damageMult: 0.5, inaccuracy: 0.07, auto: true, autoCount: 1,
+      upgrades: []
+    },
+    // -- Flank branch --
+    booster: {
+      label: "Booster", color: "#4d8fe0", desc: "Front barrel + four rear thrusters for maximum speed",
+      barrels: [{ a: 0, len: 1, w: 1 }, { a: PI * 0.78, len: 0.95, w: 0.8 }, { a: -PI * 0.78, len: 0.95, w: 0.8 },
+                { a: PI, off: 6, len: 1, w: 0.8 }, { a: PI, off: -6, len: 1, w: 0.8 }],
+      moveSpeedMult: 1.4, recoil: 1.7,
+      upgrades: []
+    },
+    fighter: {
+      label: "Fighter", color: "#4d8fe0", desc: "Front, two side, and two rear barrels",
+      barrels: [{ a: 0, len: 1, w: 1 }, { a: PI / 2, len: 0.9, w: 0.85 }, { a: -PI / 2, len: 0.9, w: 0.85 },
+                { a: PI * 0.8, len: 0.9, w: 0.8 }, { a: -PI * 0.8, len: 0.9, w: 0.8 }],
+      moveSpeedMult: 1.12, recoil: 0.9,
+      upgrades: []
+    },
+    octotank: {
+      label: "Octo Tank", color: "#4d8fe0", desc: "Eight radial barrels firing in all directions",
+      barrels: OCTO_BARRELS,
+      upgrades: []
+    },
+    // -- Smasher branch --
+    auto_smasher: {
+      label: "Auto Smasher", color: "#b06fd6", desc: "Smasher body + one automatic AI turret on top",
+      rammer: true, spikes: 6, auto: true, autoCount: 1,
+      bodyMult: 2.6, hpMult: 1.7, moveSpeedMult: 1.3, bodyRadiusMult: 1.42, maxTier: 10,
+      upgrades: []
+    },
+    spike: {
+      label: "Spike", color: "#b06fd6", desc: "Spiked shell: massive body damage and 80% bullet knockback resistance",
+      rammer: true, spikes: 12, knockbackResist: 0.8,
+      bodyMult: 4.2, hpMult: 2.0, moveSpeedMult: 1.22, bodyRadiusMult: 1.5, maxTier: 10,
+      upgrades: []
+    }
+  };
+  // Level-15 base classes (Smasher path is the "basic" hold option).
+  var CLASS_ORDER = ["twin", "sniper", "machinegun", "flank", "basic"];
+
+  // ======================================================================
+  // 3. INPUT: DUAL VIRTUAL JOYSTICKS + DESKTOP FALLBACK
+  //    Touch handling uses raw Touch events (not Pointer events) tracked by
+  //    identifier so both joysticks can be dragged simultaneously - this is
+  //    the part Pointer/mouse emulation on some mobile browsers gets wrong
+  //    when two fingers are down at once.
+  // ======================================================================
+  function makeStick(deadzone) {
+    return {
+      active: false,
+      touchId: null,
+      originX: 0, originY: 0,   // where the thumb first touched (floating base)
+      knobX: 0, knobY: 0,       // current knob screen position
+      dx: 0, dy: 0,             // normalized -1..1 output
+      mag: 0,                   // 0..1 magnitude
+      deadzone: deadzone,
+      maxRadius: 55
+    };
+  }
+  var moveStick = makeStick(0.15);
+  var aimStick = makeStick(0.2);
+
+  function updateStickFromPoint(stick, x, y) {
+    var dx = x - stick.originX;
+    var dy = y - stick.originY;
+    var dist = Math.sqrt(dx * dx + dy * dy);
+    var clamped = Math.min(dist, stick.maxRadius);
+    var angle = Math.atan2(dy, dx);
+    stick.knobX = stick.originX + Math.cos(angle) * clamped;
+    stick.knobY = stick.originY + Math.sin(angle) * clamped;
+    var norm = clamped / stick.maxRadius; // 0..1
+    if (norm < stick.deadzone) {
+      stick.dx = 0; stick.dy = 0; stick.mag = 0;
+    } else {
+      stick.dx = Math.cos(angle);
+      stick.dy = Math.sin(angle);
+      stick.mag = norm;
+    }
+  }
+
+  function resetStick(stick) {
+    stick.active = false;
+    stick.touchId = null;
+    stick.dx = 0; stick.dy = 0; stick.mag = 0;
+  }
+
+  function beginStick(stick, x, y) {
+    stick.active = true;
+    stick.originX = x;
+    stick.originY = y;
+    stick.knobX = x;
+    stick.knobY = y;
+    stick.dx = 0; stick.dy = 0; stick.mag = 0;
+  }
+
+  // --- Status button (upgrade menu toggle) + evolution overlay hit-testing ---
+  // All three hit-test helpers below reference getExpandedUpgradeButtons(),
+  // getStatusButtonRect(), and getEvolutionCards(), which are hoisted function
+  // declarations defined later in the rendering section — safe to call here.
+  var statusMenuOpen = false;
+
+  // Per the spec, the menu can only be opened while points are available; if
+  // points run out (or never existed) a tap on Status is a no-op.
+  function toggleStatusMenu() {
+    if (player.skillPoints <= 0) { statusMenuOpen = false; return; }
+    statusMenuOpen = !statusMenuOpen;
+  }
+
+  function hitStatusButton(x, y) {
+    var r = getStatusButtonRect();
+    return x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h;
+  }
+
+  function hitUpgradeButton(x, y) {
+    var rects = getExpandedUpgradeButtons();
+    for (var i = 0; i < rects.length; i++) {
+      var r = rects[i];
+      if (x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h) {
+        return r.def.key;
+      }
+    }
+    return null;
+  }
+
+  function hitEvolutionCard(x, y) {
+    var cards = getEvolutionCards();
+    for (var i = 0; i < cards.length; i++) {
+      var c = cards[i];
+      if (x >= c.x && x <= c.x + c.w && y >= c.y && y <= c.y + c.h) return c.key;
+    }
+    return null;
+  }
+
+  // --- Sandbox testing controls (only active in "sandbox" game mode) ---
+  // getSandboxButtons() is a hoisted declaration defined in the render section.
+  function hitSandboxButton(x, y) {
+    if (gameMode !== "sandbox") return null;
+    var btns = getSandboxButtons();
+    for (var i = 0; i < btns.length; i++) {
+      var b = btns[i];
+      if (x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h) return b.key;
+    }
+    return null;
+  }
+  function applySandbox(key) {
+    if (key === "max") {
+      // Jump straight to the cap; grantLevels awards a skill point per level and
+      // fires the evolution prompts so top-tier classes are reachable at once.
+      grantLevels(MAX_LEVEL - player.level);
+    } else if (key === "reset") {
+      // Wipe all progression back to a clean Level 1 / no class / no points.
+      player.level = 1; player.xp = 0; player.xpToNext = 100;
+      player.skillPoints = 0;
+      player.stats = { regen: 0, maxhp: 0, body: 0, bulletspd: 0, pen: 0, damage: 0, reload: 0, movement: 0 };
+      player.tankClass = null; player.classTier = 0;
+      player.evolutionPending = false; player.maxTier = BASE_MAX_TIER;
+      statusMenuOpen = false;
+      recomputeStats(player);
+      player.hp = player.maxHp;
+    }
+  }
+
+  // Shared tap-routing logic used by both touch and mouse input. Returns true
+  // if the tap was consumed by UI (evolution overlay / sandbox panel / status
+  // button / an expanded upgrade button) so the caller skips joystick/fire.
+  function handleUiTap(x, y) {
+    // Sandbox controls stay live even under the evolution overlay, so a tester
+    // can always bail out with Reset / re-roll with Max Level.
+    var sbx = hitSandboxButton(x, y);
+    if (sbx) { applySandbox(sbx); return true; }
+    if (player.evolutionPending) {
+      // The overlay blocks everything underneath it while a choice is
+      // pending, even taps that miss the 4 cards.
+      var classKey = hitEvolutionCard(x, y);
+      if (classKey) chooseClass(classKey);
+      return true;
+    }
+    if (hitStatusButton(x, y)) {
+      toggleStatusMenu();
+      return true;
+    }
+    if (statusMenuOpen && player.skillPoints > 0) {
+      var upKey = hitUpgradeButton(x, y);
+      if (upKey) {
+        applyUpgrade(upKey);
+        return true;
+      }
+    }
+    return false;
+  }
+
+  canvas.addEventListener("touchstart", function (e) {
+    e.preventDefault();
+    var touches = e.changedTouches;
+    for (var i = 0; i < touches.length; i++) {
+      var t = touches[i];
+      // UI is hit-tested FIRST so a tap on it is consumed and not
+      // misinterpreted as the start of a joystick drag.
+      if (handleUiTap(t.clientX, t.clientY)) continue;
+      // Left half of screen = movement stick, right half = aim/fire stick.
+      var isLeft = t.clientX < view.w / 2;
+      if (isLeft && !moveStick.active) {
+        moveStick.touchId = t.identifier;
+        beginStick(moveStick, t.clientX, t.clientY);
+      } else if (!isLeft && !aimStick.active) {
+        aimStick.touchId = t.identifier;
+        beginStick(aimStick, t.clientX, t.clientY);
+      }
+    }
+  }, { passive: false });
+
+  canvas.addEventListener("touchmove", function (e) {
+    e.preventDefault();
+    var touches = e.changedTouches;
+    for (var i = 0; i < touches.length; i++) {
+      var t = touches[i];
+      if (moveStick.active && t.identifier === moveStick.touchId) {
+        updateStickFromPoint(moveStick, t.clientX, t.clientY);
+      } else if (aimStick.active && t.identifier === aimStick.touchId) {
+        updateStickFromPoint(aimStick, t.clientX, t.clientY);
+      }
+    }
+  }, { passive: false });
+
+  function handleTouchEnd(e) {
+    e.preventDefault();
+    var touches = e.changedTouches;
+    for (var i = 0; i < touches.length; i++) {
+      var t = touches[i];
+      if (moveStick.active && t.identifier === moveStick.touchId) resetStick(moveStick);
+      if (aimStick.active && t.identifier === aimStick.touchId) resetStick(aimStick);
+    }
+  }
+  canvas.addEventListener("touchend", handleTouchEnd, { passive: false });
+  canvas.addEventListener("touchcancel", handleTouchEnd, { passive: false });
+
+  // --- Desktop fallback: WASD to move, mouse to aim, mouse-down to fire ---
+  var keys = {};
+  window.addEventListener("keydown", function (e) { keys[e.key.toLowerCase()] = true; });
+  window.addEventListener("keyup", function (e) { keys[e.key.toLowerCase()] = false; });
+
+  var mouse = { x: 0, y: 0, down: false };
+  canvas.addEventListener("mousemove", function (e) {
+    mouse.x = e.clientX; mouse.y = e.clientY;
+  });
+  canvas.addEventListener("mousedown", function (e) {
+    // Check UI first so clicking it upgrades/chooses/toggles instead of firing.
+    if (handleUiTap(e.clientX, e.clientY)) return;
+    mouse.down = true;
+  });
+  window.addEventListener("mouseup", function (e) { mouse.down = false; });
+
+  // ======================================================================
+  // 4. ENTITY FACTORIES
+  // ======================================================================
+  function randRange(a, b) { return a + Math.random() * (b - a); }
+
+  function makePlayer() {
+    return {
+      id: "you",
+      team: playerTeam,
+      name: playerName,
+      score: 0,
+      bulletColor: (TEAM[playerTeam] || TEAM.ffa).bullet,
+      x: WORLD.w / 2,
+      y: WORLD.h / 2,
+      vx: 0, vy: 0,
+      radius: PLAYER_BASE.radius,
+      hp: PLAYER_BASE.maxHp,
+      maxHp: PLAYER_BASE.maxHp,
+      turretAngle: 0,
+      fireTimer: 0,
+      hitTimer: 0,
+      regenTimer: 0,          // seconds since last damage taken
+      bodySpin: 0,            // decorative rotation for the Smasher spike ring
+      autoAngles: [0],        // per auto-turret aim (Auto-Smasher/Auto-Gunner/Hybrid)
+      autoFireTimer: 0,       // auto-turret reload countdown
+      stillTimer: 0,          // seconds standing still (Stalker invisibility)
+      invisAlpha: 1,          // current render alpha (fades for Stalker when idle)
+      level: 1,
+      xp: 0,
+      xpToNext: 100,
+      skillPoints: 0,
+      // Tiers spent per stat (the 8 standard Diep.io stats).
+      stats: { regen: 0, maxhp: 0, body: 0, bulletspd: 0, pen: 0, damage: 0, reload: 0, movement: 0 },
+      maxTier: BASE_MAX_TIER, // raised to 10 by the Smasher line (class.maxTier)
+      tankClass: null,        // current class key (see CLASSES); null before first evolution
+      classTier: 0,           // 0 = none, 1 = Tier2 (L15), 2 = Tier3 (L30), 3 = Tier4 (L45)
+      evolutionPending: false, // true while the class-choice overlay should be shown
+      // Effective stats, seeded to tier-0 base so update code needs no branching.
+      // recomputeStats() rewrites these whenever an upgrade or class is chosen.
+      moveAccel: PLAYER_BASE.accel,
+      moveMaxSpeed: PLAYER_BASE.maxSpeed,
+      fireCooldownEff: PLAYER_BASE.fireCooldown,
+      bulletDamageEff: PLAYER_BASE.bulletDamage,
+      bulletSpeedMult: 1,     // from the Bullet Speed stat
+      pierce: 1,              // shapes a bullet passes through (Bullet Penetration)
+      regenFrac: 0.02,        // fraction of maxHp regenerated per second when active
+      bodyDamageEff: PLAYER_BASE.bodyDamage // ram damage dealt to shapes
+    };
+  }
+  var player = makePlayer();
+
+  // Translate the player's spent stat tiers (and chosen class) into concrete
+  // effective values. Fully recomputes from base every call, so it's safe to
+  // call after any upgrade purchase OR class choice. Read per-frame by the
+  // update loop, which needs no class/tier branching of its own.
+  function recomputeStats(p) {
+    var s = p.stats;
+    var cls = p.tankClass ? CLASSES[p.tankClass] : null;
+    var moveMul = cls && cls.moveSpeedMult ? cls.moveSpeedMult : 1;
+    var bodyMul = cls && cls.bodyMult ? cls.bodyMult : 1;
+    var hpMul = cls && cls.hpMult ? cls.hpMult : 1;
+    var radiusMul = cls && cls.bodyRadiusMult ? cls.bodyRadiusMult : 1;
+
+    // Stat cap: Smasher line raises it from 8 to 10.
+    p.maxTier = (cls && cls.maxTier) ? cls.maxTier : BASE_MAX_TIER;
+
+    // Movement Speed
+    p.moveAccel = PLAYER_BASE.accel * (1 + 0.08 * s.movement) * moveMul;
+    p.moveMaxSpeed = PLAYER_BASE.maxSpeed * (1 + 0.08 * s.movement) * moveMul;
+    // Reload — division keeps the cooldown strictly positive at high tiers.
+    // 0.25/tier makes each point highly impactful: from a slow 0.42s at tier 0
+    // down to 0.14s (3x faster) at tier 8, so investing in Reload is essential.
+    p.fireCooldownEff = PLAYER_BASE.fireCooldown / (1 + 0.25 * s.reload);
+    // Bullet Damage / Speed / Penetration
+    p.bulletDamageEff = PLAYER_BASE.bulletDamage * (1 + 0.15 * s.damage);
+    p.bulletSpeedMult = 1 + 0.08 * s.bulletspd;
+    p.pierce = 1 + Math.floor(0.5 * s.pen); // extra shapes a bullet passes through
+    // Body (ram) damage: stat tiers stack multiplicatively with the class buff.
+    p.bodyDamageEff = PLAYER_BASE.bodyDamage * (1 + 0.25 * s.body) * bodyMul;
+    // Health Regen: fraction of maxHp per second once regen is active.
+    p.regenFrac = 0.02 + 0.03 * s.regen;
+    // Rammer classes (Smasher) get a bigger body — larger ram hitbox + visual.
+    p.radius = PLAYER_BASE.radius * radiusMul;
+    // Max Health: base * maxhp-tier * class hp multiplier. Add the gained
+    // headroom to current hp so buying Max Health / evolving heals immediately.
+    var newMax = Math.round(PLAYER_BASE.maxHp * (1 + 0.15 * s.maxhp) * hpMul);
+    var delta = newMax - p.maxHp;
+    p.maxHp = newMax;
+    if (delta > 0) p.hp = Math.min(newMax, p.hp + delta);
+    if (p.hp > p.maxHp) p.hp = p.maxHp;
+
+    // Resize the auto-turret aim array to match the class's turret count.
+    var n = (cls && cls.auto) ? (cls.autoCount || 1) : 0;
+    if (p.autoAngles.length !== n) {
+      p.autoAngles = [];
+      for (var i = 0; i < n; i++) p.autoAngles.push(0);
+    }
+  }
+
+  // Spend one skill point on the given stat if affordable and not maxed.
+  function applyUpgrade(key) {
+    if (player.skillPoints <= 0) return;
+    if (player.stats[key] === undefined) return;
+    if (player.stats[key] >= player.maxTier) return;
+    player.skillPoints--;
+    player.stats[key]++;
+    recomputeStats(player);
+    // The upgrade menu should only ever be open while points are available
+    // (see toggleStatusMenu) — collapse it the moment the last point is spent.
+    if (player.skillPoints <= 0) statusMenuOpen = false;
+  }
+
+  // The class keys currently offerable to the player: the base list before any
+  // class is chosen, otherwise the current class's `upgrades` (next tier).
+  function evolutionOptions() {
+    return player.tankClass ? (CLASSES[player.tankClass].upgrades || []) : CLASS_ORDER;
+  }
+
+  // Chooses the next class in the tree at an evolution prompt. Advances the
+  // tier so the next threshold offers the following branch.
+  function chooseClass(key) {
+    if (!player.evolutionPending) return;
+    if (evolutionOptions().indexOf(key) < 0) return;
+    player.tankClass = key;
+    player.classTier += 1;
+    player.evolutionPending = false;
+    recomputeStats(player); // apply the class's passive stat buffs right away
+    // If the current level already unlocks a further tier (e.g. after a Sandbox
+    // "Max Level" jump or a boss reward), immediately offer the next evolution
+    // so the player can climb the whole tree in one sitting.
+    var targetTier = 0;
+    for (var ei = 0; ei < EVOLVE_LEVELS.length; ei++) {
+      if (player.level >= EVOLVE_LEVELS[ei]) targetTier = ei + 1;
+    }
+    if (targetTier > player.classTier && evolutionOptions().length > 0) {
+      player.evolutionPending = true;
+    }
+  }
+
+  function spawnShape() {
+    var keys = Object.keys(SHAPE_TYPES);
+    var typeKey = keys[Math.floor(Math.random() * keys.length)];
+    var def = SHAPE_TYPES[typeKey];
+    return {
+      type: typeKey,
+      x: randRange(def.radius, WORLD.w - def.radius),
+      y: randRange(def.radius, WORLD.h - def.radius),
+      radius: def.radius,
+      hp: def.hp,
+      maxHp: def.hp,
+      rotation: randRange(0, Math.PI * 2),
+      rotSpeed: def.rot * (Math.random() < 0.5 ? 1 : -1)
+    };
+  }
+
+  var shapes = [];
+  for (var i = 0; i < MAX_SHAPES; i++) shapes.push(spawnShape());
+  var shapeRespawnTimer = 0;
+
+  var bullets = []; // pooled-by-reuse array of {x,y,vx,vy,life}
+
+  // Spawns one bullet from a source tank `src` (player or bot) at the given
+  // world angle, offset laterally by lateralOffset. Carries the shooter's team
+  // + id + color so collision code can apply friendly-fire rules. radius / life
+  // / pierce default to the base bullet.
+  function spawnBulletFrom(src, angle, lateralOffset, speed, dmg, radius, life, pierce) {
+    var ox = -Math.sin(angle) * lateralOffset;
+    var oy = Math.cos(angle) * lateralOffset;
+    var tipX = src.x + Math.cos(angle) * (src.radius + 10) + ox;
+    var tipY = src.y + Math.sin(angle) * (src.radius + 10) + oy;
+    bullets.push({
+      x: tipX,
+      y: tipY,
+      vx: Math.cos(angle) * speed,
+      vy: Math.sin(angle) * speed,
+      life: life || PLAYER_BASE.bulletLife,
+      radius: radius || PLAYER_BASE.bulletRadius,
+      dmg: dmg,
+      pierce: pierce || 1, // shapes it can still pass through
+      hit: [],             // things already damaged by this bullet (no double-hit)
+      team: src.team || "ffa",
+      ownerId: src.id,
+      color: src.bulletColor || "#f2f2f2"
+    });
+  }
+  // Backward-compatible wrapper: the local player fires through this.
+  function spawnBullet(angle, lateralOffset, speed, dmg, radius, life, pierce) {
+    spawnBulletFrom(player, angle, lateralOffset, speed, dmg, radius, life, pierce);
+  }
+
+  // Fires the main gun: one bullet per barrel in the current class's `barrels`
+  // array. Applies the Bullet Speed stat, per-barrel overrides (Hunter's large +
+  // small bullet), and per-barrel recoil (Tri-Angle/Booster thrust, Destroyer
+  // kick). Rammer classes have no `barrels` and thus no main gun.
+  function fireBullet() {
+    var cls = player.tankClass ? CLASSES[player.tankClass] : null;
+    var barrels = cls ? cls.barrels : DEFAULT_BARRELS;
+    if (!barrels) return; // gunless rammer classes (Smasher / Spike)
+
+    var speed = PLAYER_BASE.bulletSpeed * (cls && cls.speedMult ? cls.speedMult : 1) * player.bulletSpeedMult;
+    var dmg = player.bulletDamageEff * (cls && cls.damageMult ? cls.damageMult : 1);
+    var radius = PLAYER_BASE.bulletRadius * (cls && cls.bulletRadiusMult ? cls.bulletRadiusMult : 1);
+    var life = PLAYER_BASE.bulletLife * (cls && cls.bulletLifeMult ? cls.bulletLifeMult : 1);
+    var inacc = cls && cls.inaccuracy ? cls.inaccuracy : 0;
+    var recoil = (cls && cls.recoil ? cls.recoil : 0) * RECOIL_UNIT;
+
+    for (var i = 0; i < barrels.length; i++) {
+      var br = barrels[i];
+      var spread = inacc ? randRange(-inacc, inacc) : 0;
+      var ang = player.turretAngle + (br.a || 0) + spread;
+      spawnBullet(ang, br.off || 0,
+        speed * (br.sMult || 1), dmg * (br.dMult || 1),
+        radius * (br.rMult || 1), life, player.pierce);
+      // Recoil pushes the tank opposite each bullet's direction. Rear-facing
+      // thruster barrels therefore drive the tank forward.
+      if (recoil) { player.vx -= Math.cos(ang) * recoil; player.vy -= Math.sin(ang) * recoil; }
+    }
+    // Broadcast the shot so peers see us fire (and can be hit by it).
+    NET.sendFire(speed, dmg, radius);
+  }
+
+  // The auto-turret's small independent shot: weak, fast, auto-aimed.
+  function spawnAutoBullet(angle) {
+    spawnBullet(angle, 0, PLAYER_BASE.bulletSpeed * 0.9,
+      6 + player.bodyDamageEff * 0.15 + player.bulletDamageEff * 0.4,
+      PLAYER_BASE.bulletRadius * 0.7, PLAYER_BASE.bulletLife, 1);
+  }
+
+  // Nearest shape within maxDist of (x,y), or null — used by the auto turret.
+  function nearestShape(x, y, maxDist) {
+    var best = null, bd = maxDist * maxDist;
+    for (var i = 0; i < shapes.length; i++) {
+      var s = shapes[i];
+      var dx = s.x - x, dy = s.y - y, d = dx * dx + dy * dy;
+      if (d < bd) { bd = d; best = s; }
+    }
+    return best;
+  }
+
+  // ======================================================================
+  // 5. CAMERA - lerps toward the player each frame instead of snapping,
+  //    which is what gives the "smooth follow" feel requested.
+  // ======================================================================
+  var camera = { x: player.x, y: player.y };
+  // Viewport zoom: <1 shows more of the world (Sniper line's bigger viewport).
+  // Lerps toward the current class's target so evolving zooms out smoothly.
+  var viewZoom = 1;
+
+  function updateCamera(dt) {
+    var t = 1 - Math.exp(-CAMERA_SMOOTH * dt); // frame-rate independent lerp factor
+    camera.x += (player.x - camera.x) * t;
+    camera.y += (player.y - camera.y) * t;
+
+    var cls = player.tankClass ? CLASSES[player.tankClass] : null;
+    var zoomTarget = (cls && cls.viewMult) ? 1 / cls.viewMult : 1;
+    viewZoom += (zoomTarget - viewZoom) * (1 - Math.exp(-3 * dt));
+  }
+
+  // ======================================================================
+  // 5b. MULTIPLAYER FOUNDATION (WebSocket client)
+  //   A lightweight, transport-only client scaffold for future online play.
+  //   It is DISABLED by default (NET.url === null) so the game runs fully
+  //   offline in the APK with zero connection attempts / console noise. To go
+  //   live, set window.TANK_NET_URL (or NET.url) to a "wss://..." endpoint
+  //   before load, or call NET.connect(url) at runtime.
+  //
+  //   Wire protocol (JSON text frames), server-authoritative-friendly:
+  //     -> client: {t:"join", name}
+  //     -> client: {t:"state", x,y,angle,cls,hp,maxHp,level}         (~20Hz)
+  //     <- server: {t:"welcome", id}
+  //     <- server: {t:"snapshot", players:[{id,x,y,angle,cls,hp,maxHp,name}],
+  //                                bullets:[{x,y,r}]}
+  //     <- server: {t:"leave", id}
+  //   Remote players/bullets are tracked and rendered; local sim stays
+  //   authoritative for the local tank so single-player is unaffected.
+  // ======================================================================
+  // Live remote players (other real clients) and their in-flight bullets. These
+  // are populated by NET from the server and rendered/collided locally. Each
+  // client is authoritative over its OWN tank; peers see it via these.
+  var remotes = [];        // [{ id, x, y, tx, ty, a, cls, hp, maxHp, level, team, name, score, radius }]
+  var remoteBullets = [];  // bullets fired by peers; damage the LOCAL player only
+
+  function findRemote(id) { for (var i = 0; i < remotes.length; i++) if (remotes[i].id === id) return remotes[i]; return null; }
+  // Reconcile the authoritative player list from the server into `remotes`.
+  function applyPlayers(list) {
+    var seen = {};
+    for (var i = 0; i < list.length; i++) {
+      var pl = list[i];
+      if (pl.id === NET.selfId) continue; // never mirror our own tank
+      seen[pl.id] = true;
+      var r = findRemote(pl.id);
+      var rcls = pl.cls && CLASSES[pl.cls] ? CLASSES[pl.cls] : null;
+      var rad = PLAYER_BASE.radius * (rcls && rcls.bodyRadiusMult ? rcls.bodyRadiusMult : 1);
+      if (!r) {
+        r = { id: pl.id, x: pl.x, y: pl.y };
+        remotes.push(r);
+      }
+      r.tx = pl.x; r.ty = pl.y;           // interpolate toward these
+      r.a = pl.a || 0; r.cls = pl.cls || null;
+      r.hp = pl.hp; r.maxHp = pl.maxHp; r.level = pl.level || 1;
+      r.team = pl.team || "ffa"; r.name = pl.name || "player";
+      r.score = pl.score || 0; r.radius = rad;
+    }
+    // Drop players no longer present.
+    for (var j = remotes.length - 1; j >= 0; j--) if (!seen[remotes[j].id]) remotes.splice(j, 1);
+  }
+  function removeRemote(id) { for (var i = remotes.length - 1; i >= 0; i--) if (remotes[i].id === id) remotes.splice(i, 1); }
+
+  // A peer fired: reconstruct their shot from the class barrel pattern as
+  // locally-simulated bullets that can hit (only) the local player.
+  function spawnRemoteFire(m) {
+    var cls = m.cls && CLASSES[m.cls] ? CLASSES[m.cls] : null;
+    var barrels = cls ? cls.barrels : DEFAULT_BARRELS;
+    if (!barrels) return;
+    var col = (TEAM[m.team] || TEAM.ffa).bullet;
+    for (var i = 0; i < barrels.length; i++) {
+      var br = barrels[i];
+      var ang = (m.a || 0) + (br.a || 0);
+      var sp = (m.spd || PLAYER_BASE.bulletSpeed) * (br.sMult || 1);
+      var off = br.off || 0;
+      var ox = -Math.sin(ang) * off, oy = Math.cos(ang) * off;
+      remoteBullets.push({
+        x: m.x + Math.cos(ang) * (PLAYER_BASE.radius + 10) + ox,
+        y: m.y + Math.sin(ang) * (PLAYER_BASE.radius + 10) + oy,
+        vx: Math.cos(ang) * sp, vy: Math.sin(ang) * sp,
+        life: PLAYER_BASE.bulletLife, radius: (m.r || PLAYER_BASE.bulletRadius) * (br.rMult || 1),
+        dmg: (m.dmg || PLAYER_BASE.bulletDamage) * (br.dMult || 1),
+        team: m.team || "ffa", ownerId: m.id, color: col
+      });
+    }
+  }
+  function updateRemotes(dt) {
+    var t = 1 - Math.exp(-14 * dt); // smooth toward the latest server position
+    for (var i = 0; i < remotes.length; i++) {
+      var r = remotes[i];
+      if (r.tx !== undefined) { r.x += (r.tx - r.x) * t; r.y += (r.ty - r.y) * t; }
+    }
+  }
+  function updateRemoteBullets(dt) {
+    for (var i = remoteBullets.length - 1; i >= 0; i--) {
+      var b = remoteBullets[i];
+      b.x += b.vx * dt; b.y += b.vy * dt; b.life -= dt;
+      var gone = b.life <= 0 || b.x < 0 || b.x > WORLD.w || b.y < 0 || b.y > WORLD.h;
+      // A peer's bullet damages the LOCAL player (each client owns its own HP).
+      if (!gone && gameState === "playing" && bulletHitsTank(b, player) && circleHit(b, player)) {
+        damageTank(player, b.dmg);
+        if (player === player && player.hp !== undefined) { /* score handled by killer's client */ }
+        gone = true;
+      }
+      if (gone) remoteBullets.splice(i, 1);
+    }
+  }
+
+  // ---- WebSocket network module (real-time multiplayer) ----
+  var NET = {
+    url: (typeof window !== "undefined" && window.TANK_NET_URL) ||
+         (MULTIPLAYER_URL.indexOf("REPLACE-WITH") < 0 ? MULTIPLAYER_URL : null),
+    ws: null,
+    connected: false,
+    wantConnect: false,
+    selfId: null,
+    sendTimer: 0,
+    sendInterval: 0.05,     // 20 Hz outbound state
+    reconnectTimer: 0,
+
+    connect: function () {
+      if (!this.url || typeof WebSocket === "undefined") return;
+      try {
+        var ws = new WebSocket(this.url);
+        this.ws = ws;
+        var self = this;
+        ws.onopen = function () {
+          self.connected = true;
+          self.send({ t: "join", name: playerName, team: playerTeam, mode: gameMode,
+                      cls: player.tankClass, level: player.level });
+        };
+        ws.onmessage = function (ev) { self._onMessage(ev.data); };
+        ws.onclose = function () {
+          self.connected = false; remotes = []; remoteBullets = [];
+          if (self.wantConnect) self.reconnectTimer = 2; // auto-reconnect
+        };
+        ws.onerror = function () { /* onclose resets + schedules reconnect */ };
+      } catch (e) { /* stay solo on any failure */ }
+    },
+    // Called from Play: begin (and keep) a live connection.
+    start: function () { this.wantConnect = true; if (!this.connected) this.connect(); },
+    disconnect: function () {
+      this.wantConnect = false;
+      if (this.ws) { try { this.ws.close(); } catch (e) {} }
+      this.ws = null; this.connected = false; remotes = []; remoteBullets = [];
+    },
+    send: function (obj) { if (this.connected && this.ws) { try { this.ws.send(JSON.stringify(obj)); } catch (e) {} } },
+    // Broadcast a shot so peers can see us fire.
+    sendFire: function (spd, dmg, r) {
+      this.send({ t: "fire", id: this.selfId, x: Math.round(player.x), y: Math.round(player.y),
+                  a: +player.turretAngle.toFixed(3), cls: player.tankClass, team: player.team,
+                  spd: Math.round(spd), dmg: Math.round(dmg), r: Math.round(r) });
+    },
+
+    _onMessage: function (data) {
+      var msg;
+      try { msg = JSON.parse(data); } catch (e) { return; }
+      if (msg.t === "welcome") {
+        this.selfId = msg.id;
+        // Server may reassign our team to balance 2-Teams mode.
+        if (msg.team && gameMode === "teams" && msg.team !== playerTeam) {
+          playerTeam = msg.team; player.team = msg.team;
+          player.bulletColor = (TEAM[msg.team] || TEAM.ffa).bullet;
+          notif = { text: "Assigned to " + (msg.team === "red" ? "Red" : "Blue") + " Team for balance", timer: 4 };
+        }
+      } else if (msg.t === "players") {
+        applyPlayers(msg.list || []);
+      } else if (msg.t === "fire") {
+        if (msg.id !== this.selfId) spawnRemoteFire(msg);
+      } else if (msg.t === "leave") {
+        removeRemote(msg.id);
+      }
+    },
+
+    update: function (dt) {
+      if (this.reconnectTimer > 0) {
+        this.reconnectTimer -= dt;
+        if (this.reconnectTimer <= 0 && this.wantConnect && !this.connected) this.connect();
+      }
+      if (!this.connected) return;
+      this.sendTimer -= dt;
+      if (this.sendTimer <= 0) {
+        this.sendTimer = this.sendInterval;
+        this.send({
+          t: "state", x: Math.round(player.x), y: Math.round(player.y),
+          a: +player.turretAngle.toFixed(3), cls: player.tankClass,
+          hp: Math.round(player.hp), maxHp: player.maxHp, level: player.level,
+          score: player.score || 0, team: player.team, name: player.name
+        });
+      }
+    }
+  };
+
+  // Read-only multiplayer status, exposed for quick debugging from the browser
+  // console. e.g. `TankMP.connected` to confirm the socket is live, or
+  // `TankMP.remotes` to list the other real players the client is rendering.
+  if (typeof window !== "undefined") {
+    window.TankMP = {
+      get connected() { return NET.connected; },
+      get id() { return NET.selfId; },
+      get url() { return NET.url; },
+      get remotes() {
+        return remotes.map(function (r) {
+          return { id: r.id, name: r.name, team: r.team, level: r.level,
+                   x: Math.round(r.x), y: Math.round(r.y), hp: Math.round(r.hp) };
+        });
+      },
+      get remoteBullets() { return remoteBullets.length; },
+      // Snapshot of the local tank's build — handy for checking a Sandbox setup.
+      get player() {
+        return { mode: gameMode, level: player.level, skillPoints: player.skillPoints,
+                 cls: player.tankClass, classTier: player.classTier,
+                 stats: JSON.parse(JSON.stringify(player.stats)),
+                 fireCooldown: +player.fireCooldownEff.toFixed(3),
+                 evolutionPending: player.evolutionPending };
+      }
+    };
+  }
+
+  // ======================================================================
+  // 6. UPDATE LOGIC
+  // ======================================================================
+  function clamp(v, min, max) { return v < min ? min : (v > max ? max : v); }
+
+  function updatePlayer(dt) {
+    // --- movement: combine touch joystick + desktop WASD fallback ---
+    var mx = moveStick.mag > 0 ? moveStick.dx * moveStick.mag : 0;
+    var my = moveStick.mag > 0 ? moveStick.dy * moveStick.mag : 0;
+    if (mx === 0 && my === 0) {
+      var kx = (keys["d"] ? 1 : 0) - (keys["a"] ? 1 : 0);
+      var ky = (keys["s"] ? 1 : 0) - (keys["w"] ? 1 : 0);
+      var klen = Math.sqrt(kx * kx + ky * ky);
+      if (klen > 0) { mx = kx / klen; my = ky / klen; }
+    }
+
+    player.vx += mx * player.moveAccel * dt;
+    player.vy += my * player.moveAccel * dt;
+
+    // Exponential friction/drag (frame-rate independent) so the tank glides
+    // to a stop rather than halting instantly - gives it a "tank" feel.
+    var drag = Math.exp(-PLAYER_BASE.friction * dt);
+    player.vx *= drag;
+    player.vy *= drag;
+
+    var speed = Math.sqrt(player.vx * player.vx + player.vy * player.vy);
+    if (speed > player.moveMaxSpeed) {
+      var scale = player.moveMaxSpeed / speed;
+      player.vx *= scale; player.vy *= scale;
+    }
+
+    player.x = clamp(player.x + player.vx * dt, player.radius, WORLD.w - player.radius);
+    player.y = clamp(player.y + player.vy * dt, player.radius, WORLD.h - player.radius);
+
+    // --- aiming + auto-fire: touch joystick, else mouse ---
+    var aiming = false;
+    if (aimStick.mag > aimStick.deadzone) {
+      player.turretAngle = Math.atan2(aimStick.dy, aimStick.dx);
+      aiming = true;
+    } else if (mouse.down) {
+      var sp = worldToScreen(player.x, player.y);
+      player.turretAngle = Math.atan2(mouse.y - sp.y, mouse.x - sp.x);
+      aiming = true;
+    }
+
+    var cls = player.tankClass ? CLASSES[player.tankClass] : null;
+    player.fireTimer -= dt;
+    var didFire = false;
+    if (aiming && player.fireTimer <= 0) {
+      fireBullet();
+      didFire = true;
+      player.fireTimer = player.fireCooldownEff * (cls && cls.reloadMult ? cls.reloadMult : 1);
+    }
+
+    // Auto-turret(s) (Auto-Smasher / Auto-Gunner / Hybrid drones): independently
+    // target and fire at the nearest shape regardless of the aim joystick.
+    player.autoFireTimer -= dt;
+    if (cls && cls.auto) {
+      var target = nearestShape(player.x, player.y, 640);
+      var fireAuto = player.autoFireTimer <= 0;
+      for (var ti = 0; ti < player.autoAngles.length; ti++) {
+        if (target) {
+          player.autoAngles[ti] = Math.atan2(target.y - player.y, target.x - player.x);
+          if (fireAuto) spawnAutoBullet(player.autoAngles[ti]);
+        } else {
+          player.autoAngles[ti] += dt * 0.7; // idle sweep
+        }
+      }
+      if (fireAuto && target) player.autoFireTimer = 0.35;
+    }
+
+    if (player.hitTimer > 0) player.hitTimer -= dt;
+    player.bodySpin += dt * 1.5; // slow rotation for the Smasher spike ring
+
+    // Stalker invisibility: fade out while standing still and not firing.
+    var moving = (mx !== 0 || my !== 0);
+    if (cls && cls.invisible && !moving && !aiming && !didFire) {
+      player.stillTimer += dt;
+    } else {
+      player.stillTimer = 0;
+    }
+    var alphaTarget = (cls && cls.invisible && player.stillTimer > 1.0) ? 0.08 : 1;
+    player.invisAlpha += (alphaTarget - player.invisAlpha) * (1 - Math.exp(-6 * dt));
+
+    // Health regeneration: after REGEN_DELAY seconds without taking damage, heal
+    // at p.regenFrac of maxHp/sec (scales with the Health Regen stat). Reset on
+    // damage in checkCollisions().
+    player.regenTimer += dt;
+    if (player.regenTimer >= REGEN_DELAY && player.hp < player.maxHp) {
+      player.hp = Math.min(player.maxHp, player.hp + player.maxHp * player.regenFrac * dt);
+    }
+  }
+
+  function updateBullets(dt) {
+    for (var i = bullets.length - 1; i >= 0; i--) {
+      var b = bullets[i];
+      b.x += b.vx * dt;
+      b.y += b.vy * dt;
+      b.life -= dt;
+      if (b.life <= 0 || b.x < 0 || b.x > WORLD.w || b.y < 0 || b.y > WORLD.h) {
+        bullets.splice(i, 1);
+      }
+    }
+  }
+
+  function updateShapes(dt) {
+    for (var i = 0; i < shapes.length; i++) {
+      shapes[i].rotation += shapes[i].rotSpeed * dt;
+    }
+    // Keep the shape count topped up quickly in small batches so the larger
+    // map stays dense without one giant pop-in.
+    shapeRespawnTimer -= dt;
+    if (shapeRespawnTimer <= 0) {
+      shapeRespawnTimer = SHAPE_RESPAWN_INTERVAL;
+      for (var b = 0; b < SHAPE_RESPAWN_BATCH && shapes.length < MAX_SHAPES; b++) {
+        shapes.push(spawnShape());
+      }
+    }
+  }
+
+  // Advance exactly one level (unless already at MAX_LEVEL): grant a skill point
+  // and open the evolution prompt if a new class tier just unlocked.
+  function levelUp() {
+    if (player.level >= MAX_LEVEL) return;
+    player.level++;
+    player.xpToNext = Math.round(player.xpToNext * 1.35);
+    player.skillPoints++;
+    var targetTier = 0;
+    for (var ei = 0; ei < EVOLVE_LEVELS.length; ei++) {
+      if (player.level >= EVOLVE_LEVELS[ei]) targetTier = ei + 1;
+    }
+    if (targetTier > player.classTier && !player.evolutionPending && evolutionOptions().length > 0) {
+      player.evolutionPending = true;
+    }
+  }
+
+  function grantXp(amount) {
+    if (player.level >= MAX_LEVEL) { player.xp = 0; return; }
+    player.xp += amount;
+    while (player.xp >= player.xpToNext && player.level < MAX_LEVEL) {
+      player.xp -= player.xpToNext;
+      levelUp();
+    }
+    if (player.level >= MAX_LEVEL) player.xp = 0;
+  }
+
+  // Boss reward: jump the player up exactly n levels instantly (capped at
+  // MAX_LEVEL), bypassing the XP system entirely.
+  function grantLevels(n) {
+    for (var i = 0; i < n && player.level < MAX_LEVEL; i++) levelUp();
+  }
+
+  // ======================================================================
+  // 6b. BOTS + MYTHICAL BOSS SYSTEM
+  // ======================================================================
+  var bots = [];
+  var drones = [];                  // Summoner Core homing triangle drones
+  var boss = null;                  // active boss entity, or null
+  var bossTimer = BOSS_INTERVAL;    // countdown to the next spawn
+  var bossWarningActive = false;    // blinking warning during the last BOSS_WARNING s
+  var notif = { text: "", timer: 0 }; // global kill/announcement toast
+  var DRONE_CONTACT = 12;           // drone ram damage per tick
+
+  function circleHit(a, b) {
+    var dx = a.x - b.x, dy = a.y - b.y, r = a.radius + b.radius;
+    return dx * dx + dy * dy < r * r;
+  }
+  function nearestTank(x, y, maxDist, team) {
+    var best = null, bd = (maxDist || 1e9) * (maxDist || 1e9);
+    var list = allTanks();
+    for (var i = 0; i < list.length; i++) {
+      var t = list[i];
+      if (team && t.team === team) continue; // skip same-team when asked
+      var dx = t.x - x, dy = t.y - y, d = dx * dx + dy * dy;
+      if (d < bd) { bd = d; best = t; }
+    }
+    return best;
+  }
+  // Local player plus live remote players — used for boss/drone targeting and
+  // the minimap. (Remote tanks are visual + AI targets; each peer is
+  // authoritative over its own HP, so local hazards only damage `player`.)
+  function allTanks() {
+    return [player].concat(remotes);
+  }
+  function findBot(id) { return null; } // bots removed; kept as a no-op for callers
+
+  // Damage rule: a bullet hurts a tank if it's not the owner and either it's a
+  // boss bullet, or FFA, or the tank is on a different team (friendly fire off).
+  function bulletHitsTank(b, t) {
+    if (b.ownerId === t.id) return false;
+    if (b.team === "boss") return true;
+    if (gameMode !== "teams") return true;
+    return b.team !== t.team;
+  }
+  function tankBodyDamage(t) { return t === player ? player.bodyDamageEff : t.bodyDamage; }
+
+  function damageTank(t, dmg) {
+    t.hp -= dmg;
+    t.regenTimer = 0;
+    if (t.hp <= 0) {
+      if (t === player) { respawnPlayer(); }
+      else { t.alive = false; t.respawnTimer = 3 + Math.random() * 3; }
+    }
+  }
+
+  // ---- Boss ----
+  function spawnBoss() {
+    var key = BOSS_ORDER[Math.floor(Math.random() * BOSS_ORDER.length)];
+    var def = BOSS_TYPES[key];
+    boss = {
+      key: key, def: def, name: def.name,
+      x: WORLD.w / 2, y: WORLD.h / 2, vx: 0, vy: 0,
+      radius: def.radius, hp: def.hp, maxHp: def.hp,
+      angle: 0, spin: 0, fireTimer: 1, turretTimer: 0, summonTimer: 0, team: "boss", id: "boss"
+    };
+    drones = [];
+    notif = { text: "A " + def.name + " has appeared at the center!", timer: 4 };
+    // Reset the on-screen countdown to a full 10:00 the instant the boss spawns.
+    bossTimer = BOSS_INTERVAL; bossWarningActive = false;
+  }
+  function killBoss(ownerId) {
+    if (!boss) return;
+    var killer = ownerId === "you" ? player.name : (findBot(ownerId) ? findBot(ownerId).name : "A tank");
+    notif = { text: killer + " has defeated the " + boss.name + "!", timer: 6 };
+    if (ownerId === "you") { grantLevels(BOSS_LEVEL_REWARD); player.score += 500; } // instant +10 levels (capped)
+    boss = null; drones = [];
+    bossTimer = BOSS_INTERVAL; bossWarningActive = false;
+  }
+  function updateBoss(dt) {
+    if (!boss) {
+      bossTimer -= dt;
+      bossWarningActive = bossTimer <= BOSS_WARNING;
+      if (bossTimer <= 0) spawnBoss();
+      return;
+    }
+    var d = boss.def;
+    boss.spin += dt * 0.5;
+    boss.fireTimer -= dt;
+    var target = nearestTank(boss.x, boss.y, 4000, null); // boss is hostile to all
+
+    if (d.radial) {
+      // Polygon King: spin + fire 5 bullets radially outward.
+      boss.angle += dt * 0.6;
+      if (boss.fireTimer <= 0) {
+        boss.fireTimer = d.reload;
+        for (var k = 0; k < d.barrels; k++) {
+          var a = boss.angle + (k / d.barrels) * Math.PI * 2;
+          spawnBulletFrom(boss, a, 0, d.bulletSpeed, d.bulletDmg, d.bulletR, 2.2, 3);
+        }
+      }
+    } else if (d.summon) {
+      // Summoner Core: spawn homing drones up to the cap.
+      boss.summonTimer -= dt;
+      if (boss.summonTimer <= 0 && drones.length < BOSS_MAX_DRONES) {
+        boss.summonTimer = 0.6;
+        var ang = Math.random() * Math.PI * 2;
+        drones.push({
+          x: boss.x + Math.cos(ang) * boss.radius, y: boss.y + Math.sin(ang) * boss.radius,
+          vx: 0, vy: 0, angle: ang, radius: 15, hp: 30, maxHp: 30
+        });
+      }
+    } else if (d.rammer) {
+      // Giga Smasher: charge the nearest tank, faster as HP drops.
+      if (target) {
+        var frac = 1 - boss.hp / boss.maxHp;
+        var spd = d.baseSpeed + (d.rageSpeed - d.baseSpeed) * frac;
+        var ang2 = Math.atan2(target.y - boss.y, target.x - boss.x);
+        boss.x += Math.cos(ang2) * spd * dt;
+        boss.y += Math.sin(ang2) * spd * dt;
+      }
+    } else if (d.rearTurrets) {
+      // Omega Dreadnought: aim main barrel + fire giant one-shot bullets;
+      // rear turrets fire smaller defensive shots.
+      if (target) boss.angle = Math.atan2(target.y - boss.y, target.x - boss.x);
+      if (boss.fireTimer <= 0) {
+        boss.fireTimer = d.reload;
+        spawnBulletFrom(boss, boss.angle, 0, d.bulletSpeed, d.bulletDmg, d.bulletR, 3.5, 5);
+      }
+      boss.turretTimer -= dt;
+      if (boss.turretTimer <= 0) {
+        boss.turretTimer = d.turretReload;
+        var rear = boss.angle + Math.PI;
+        spawnBulletFrom(boss, rear + 0.35, 0, d.turretSpeed, d.turretDmg, d.turretBulletR, 2, 2);
+        spawnBulletFrom(boss, rear - 0.35, 0, d.turretSpeed, d.turretDmg, d.turretBulletR, 2, 2);
+      }
+    }
+    boss.x = clamp(boss.x, boss.radius, WORLD.w - boss.radius);
+    boss.y = clamp(boss.y, boss.radius, WORLD.h - boss.radius);
+  }
+
+  function updateDrones(dt) {
+    for (var i = drones.length - 1; i >= 0; i--) {
+      var dr = drones[i];
+      var t = nearestTank(dr.x, dr.y, 1600, null);
+      if (t) {
+        dr.angle = Math.atan2(t.y - dr.y, t.x - dr.x);
+        dr.vx += Math.cos(dr.angle) * 700 * dt;
+        dr.vy += Math.sin(dr.angle) * 700 * dt;
+      }
+      var drag = Math.exp(-3 * dt); dr.vx *= drag; dr.vy *= drag;
+      var sp = Math.sqrt(dr.vx * dr.vx + dr.vy * dr.vy), mxs = 260;
+      if (sp > mxs) { dr.vx *= mxs / sp; dr.vy *= mxs / sp; }
+      dr.x += dr.vx * dt; dr.y += dr.vy * dt;
+    }
+  }
+
+  // Boss/drone/tank collisions that live outside the shape-focused
+  // checkCollisions(): bullets vs boss/drones/enemy tanks, and body contact.
+  function checkCombat(dt) {
+    // --- bullets vs boss, drones, and enemy tanks ---
+    for (var bi = bullets.length - 1; bi >= 0; bi--) {
+      var b = bullets[bi];
+      if (b.pierce <= 0) continue;
+      // vs boss
+      if (boss && b.team !== "boss" && b.hit.indexOf(boss) < 0 && circleHit(b, boss)) {
+        boss.hp -= b.dmg; b.hit.push(boss); b.pierce -= 1;
+        if (boss.hp <= 0) { killBoss(b.ownerId); if (b.pierce <= 0) { bullets.splice(bi, 1); continue; } }
+        if (b.pierce <= 0) { bullets.splice(bi, 1); continue; }
+      }
+      // vs drones
+      if (b.team !== "boss") {
+        for (var di = drones.length - 1; di >= 0; di--) {
+          var dr = drones[di];
+          if (b.hit.indexOf(dr) >= 0) continue;
+          if (circleHit(b, dr)) { dr.hp -= b.dmg; b.hit.push(dr); b.pierce -= 1; if (dr.hp <= 0) drones.splice(di, 1); break; }
+        }
+        if (b.pierce <= 0) { bullets.splice(bi, 1); continue; }
+      }
+      // vs the LOCAL player only: boss bullets hit us; our own bullets skip us
+      // (owner check). Peers take damage from OUR shots on their own client via
+      // the relayed fire event, so we never mutate a remote tank's HP here.
+      if (b.hit.indexOf(player) < 0 && bulletHitsTank(b, player) && circleHit(b, player)) {
+        damageTank(player, b.dmg); b.hit.push(player); b.pierce -= 1;
+      }
+      if (b.pierce <= 0) bullets.splice(bi, 1);
+    }
+
+    // --- body contact: LOCAL player vs boss + drones (rate-limited) ---
+    var tanks2 = [player];
+    for (var i = 0; i < tanks2.length; i++) {
+      var tk = tanks2[i];
+      // vs boss
+      if (boss && circleHit(tk, boss)) {
+        var dx = tk.x - boss.x, dy = tk.y - boss.y, dist = Math.sqrt(dx * dx + dy * dy) || 1;
+        var nx = dx / dist, ny = dy / dist, overlap = tk.radius + boss.radius - dist;
+        // Boss barely moves (heavy + knockback resist); the tank is pushed out.
+        var kr = boss.def.knockbackResist || 0.6;
+        tk.x += nx * overlap * (1 - (1 - kr) * 0.5);
+        tk.y += ny * overlap * (1 - (1 - kr) * 0.5);
+        if (tk.hitTimer <= 0) {
+          damageTank(tk, boss.def.contact);
+          tk.hitTimer = PLAYER_BASE.hitCooldown;
+          if (boss) { boss.hp -= tankBodyDamage(tk); if (boss.hp <= 0) killBoss(tk.id); }
+        }
+      }
+      // vs drones
+      for (var di2 = drones.length - 1; di2 >= 0; di2--) {
+        var d2 = drones[di2];
+        if (circleHit(tk, d2)) {
+          if (tk.hitTimer <= 0) { damageTank(tk, DRONE_CONTACT); tk.hitTimer = PLAYER_BASE.hitCooldown; }
+          d2.hp -= tankBodyDamage(tk);
+          if (d2.hp <= 0) drones.splice(di2, 1);
+        }
+      }
+    }
+  }
+
+  // --- Collision detection: flat circle-vs-circle checks. At this entity
+  // count (dozens of shapes/bullets) a spatial grid would be premature
+  // optimization; O(n*m) is cheap enough per frame. ---
+  function checkCollisions() {
+    // Bullets vs shapes. Penetration (b.pierce) lets one bullet pass through
+    // several shapes; b.hit prevents damaging the same shape twice. Boss bullets
+    // don't interact with shapes.
+    for (var bi = bullets.length - 1; bi >= 0; bi--) {
+      var b = bullets[bi];
+      if (b.team === "boss") continue;
+      for (var si = 0; si < shapes.length; si++) {
+        var s = shapes[si];
+        if (b.hit.indexOf(s) >= 0) continue; // already hit this shape
+        var dx = b.x - s.x, dy = b.y - s.y;
+        var distSq = dx * dx + dy * dy;
+        var minDist = b.radius + s.radius;
+        if (distSq < minDist * minDist) {
+          s.hp -= b.dmg;
+          b.hit.push(s);
+          b.pierce -= 1;
+          if (s.hp <= 0) {
+            grantXp(SHAPE_TYPES[s.type].xp * XP_MULTIPLIER);
+            player.score += SHAPE_TYPES[s.type].xp;
+            shapes.splice(si, 1);
+          }
+          break; // at most one new shape per frame
+        }
+      }
+      if (b.pierce <= 0) bullets.splice(bi, 1);
+    }
+
+    // Player vs shapes: TWO-WAY ram damage (rate-limited) + knockback.
+    // On each collision tick (gated by hitTimer) the player deals Body Damage
+    // to the shape AND takes contact damage (reduced by Shield) from it — the
+    // Rammer mechanic. Ticking on the same timer keeps the exchange fair and
+    // stops a single overlapping frame from instantly deleting the shape.
+    for (var i = 0; i < shapes.length; i++) {
+      var sh = shapes[i];
+      var dx = player.x - sh.x, dy = player.y - sh.y;
+      var dist = Math.sqrt(dx * dx + dy * dy);
+      var minDist = player.radius + sh.radius;
+      if (dist < minDist && dist > 0.0001) {
+        var overlap = minDist - dist;
+        var nx = dx / dist, ny = dy / dist;
+        // Push both apart proportional to overlap - simple elastic separation
+        // rather than a full physics solver. Spike-line classes resist
+        // knockback, so the player holds ground and the shape absorbs the push.
+        var pcls = player.tankClass ? CLASSES[player.tankClass] : null;
+        var kr = pcls && pcls.knockbackResist ? pcls.knockbackResist : 0; // 0..1
+        var pPush = 0.5 * (1 - kr), sPush = 1 - pPush; // still fully separate
+        player.x += nx * overlap * pPush;
+        player.y += ny * overlap * pPush;
+        sh.x -= nx * overlap * sPush;
+        sh.y -= ny * overlap * sPush;
+
+        if (player.hitTimer <= 0) {
+          // Shape takes the player's body damage.
+          sh.hp -= player.bodyDamageEff;
+          // Player takes contact damage from the shape.
+          player.hp -= PLAYER_BASE.contactDamage;
+          player.hitTimer = PLAYER_BASE.hitCooldown;
+          player.regenTimer = 0;   // taking damage restarts the regen delay
+
+          if (sh.hp <= 0) {
+            grantXp(SHAPE_TYPES[sh.type].xp * XP_MULTIPLIER); // ram kills grant XP too
+            player.score += SHAPE_TYPES[sh.type].xp;
+            shapes.splice(i, 1);
+            i--;
+          }
+          if (player.hp <= 0) { respawnPlayer(); break; }
+        }
+      }
+    }
+
+    player.x = clamp(player.x, player.radius, WORLD.w - player.radius);
+    player.y = clamp(player.y, player.radius, WORLD.h - player.radius);
+  }
+
+  function respawnPlayer() {
+    // Prototype-friendly: no separate game-over screen, just reset in place
+    // so the core loop (drive/aim/shoot) is always immediately testable.
+    Object.assign(player, makePlayer());
+  }
+
+  // ======================================================================
+  // 7. RENDERING
+  // ======================================================================
+  // World -> screen, applying the viewport zoom around screen center.
+  function worldToScreen(x, y) {
+    return { x: (x - camera.x) * viewZoom + view.w / 2, y: (y - camera.y) * viewZoom + view.h / 2 };
+  }
+  // Scale a world-space size (radius, barrel length, ...) into screen pixels.
+  function ZS(v) { return v * viewZoom; }
+
+  function drawGrid() {
+    ctx.strokeStyle = "rgba(255,255,255,0.06)";
+    ctx.lineWidth = 1;
+    var halfW = (view.w / 2) / viewZoom, halfH = (view.h / 2) / viewZoom;
+    var startX = Math.floor((camera.x - halfW) / GRID_SIZE) * GRID_SIZE;
+    var startY = Math.floor((camera.y - halfH) / GRID_SIZE) * GRID_SIZE;
+    var endX = camera.x + halfW;
+    var endY = camera.y + halfH;
+    ctx.beginPath();
+    for (var x = startX; x < endX; x += GRID_SIZE) {
+      var p = worldToScreen(x, 0);
+      ctx.moveTo(p.x, 0);
+      ctx.lineTo(p.x, view.h);
+    }
+    for (var y = startY; y < endY; y += GRID_SIZE) {
+      var p2 = worldToScreen(0, y);
+      ctx.moveTo(0, p2.y);
+      ctx.lineTo(view.w, p2.y);
+    }
+    ctx.stroke();
+  }
+
+  function drawWorldBounds() {
+    var topLeft = worldToScreen(0, 0);
+    ctx.strokeStyle = "rgba(255,80,80,0.5)";
+    ctx.lineWidth = 4;
+    ctx.strokeRect(topLeft.x, topLeft.y, ZS(WORLD.w), ZS(WORLD.h));
+  }
+
+  function drawPolygon(cx, cy, radius, sides, rotation, color) {
+    ctx.beginPath();
+    for (var i = 0; i < sides; i++) {
+      var angle = rotation + (i / sides) * Math.PI * 2;
+      var px = cx + Math.cos(angle) * radius;
+      var py = cy + Math.sin(angle) * radius;
+      if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    }
+    ctx.closePath();
+    ctx.fillStyle = color;
+    ctx.fill();
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = "rgba(0,0,0,0.35)";
+    ctx.stroke();
+  }
+
+  function drawShapes() {
+    for (var i = 0; i < shapes.length; i++) {
+      var s = shapes[i];
+      var p = worldToScreen(s.x, s.y);
+      if (p.x < -60 || p.x > view.w + 60 || p.y < -60 || p.y > view.h + 60) continue; // cull offscreen
+      var def = SHAPE_TYPES[s.type];
+      var r = ZS(s.radius);
+      drawPolygon(p.x, p.y, r, def.sides, s.rotation, def.color);
+      // HP bar only if damaged, mirrors diep.io behavior
+      if (s.hp < s.maxHp) {
+        var barW = r * 2;
+        var ratio = Math.max(s.hp / s.maxHp, 0);
+        ctx.fillStyle = "rgba(0,0,0,0.4)";
+        ctx.fillRect(p.x - barW / 2, p.y - r - 12, barW, 5);
+        ctx.fillStyle = "#4caf50";
+        ctx.fillRect(p.x - barW / 2, p.y - r - 12, barW * ratio, 5);
+      }
+    }
+  }
+
+  function drawBullets() {
+    for (var i = 0; i < bullets.length; i++) {
+      var b = bullets[i];
+      var p = worldToScreen(b.x, b.y);
+      if (p.x < -40 || p.x > view.w + 40 || p.y < -40 || p.y > view.h + 40) continue;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, ZS(b.radius), 0, Math.PI * 2);
+      ctx.fillStyle = b.team === "boss" ? "#ff5a5a" : (b.color || "#f2f2f2");
+      ctx.fill();
+    }
+  }
+
+  // ---- Boss / drone / minimap rendering ----
+  function drawDrones() {
+    for (var i = 0; i < drones.length; i++) {
+      var dr = drones[i];
+      var p = worldToScreen(dr.x, dr.y);
+      if (p.x < -40 || p.x > view.w + 40 || p.y < -40 || p.y > view.h + 40) continue;
+      drawPolygon(p.x, p.y, ZS(dr.radius), 3, dr.angle, "#e0c740");
+    }
+  }
+
+  function drawBoss() {
+    if (!boss) return;
+    var p = worldToScreen(boss.x, boss.y);
+    var d = boss.def, R = ZS(boss.radius);
+    // radial / turret barrels
+    if (d.radial) {
+      ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(boss.angle);
+      ctx.fillStyle = "#7d7f88";
+      for (var k = 0; k < d.barrels; k++) {
+        ctx.save(); ctx.rotate((k / d.barrels) * Math.PI * 2);
+        ctx.fillRect(0, -ZS(9), R + ZS(26), ZS(18)); ctx.restore();
+      }
+      ctx.restore();
+    } else if (d.rearTurrets) {
+      ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(boss.angle);
+      ctx.fillStyle = "#5f6d5f";
+      ctx.fillRect(0, -ZS(20), R + ZS(46), ZS(40)); // colossal main barrel
+      ctx.restore();
+    }
+    // rammer spike ring
+    if (d.rammer) {
+      ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(boss.spin);
+      ctx.beginPath();
+      var spikes = d.spikes || 10, rO = R + ZS(16);
+      for (var s = 0; s < spikes; s++) {
+        var a = (s / spikes) * Math.PI * 2, sx = Math.cos(a) * rO, sy = Math.sin(a) * rO;
+        if (s === 0) ctx.moveTo(sx, sy); else ctx.lineTo(sx, sy);
+      }
+      ctx.closePath(); ctx.fillStyle = "#5c6672"; ctx.fill(); ctx.restore();
+    }
+    // body
+    if (d.sides && d.sides > 0) drawPolygon(p.x, p.y, R, d.sides, boss.spin, d.color);
+    else { ctx.beginPath(); ctx.arc(p.x, p.y, R, 0, Math.PI * 2); ctx.fillStyle = d.color; ctx.fill(); }
+    ctx.lineWidth = 4; ctx.strokeStyle = d.stroke; ctx.stroke();
+    // boss name label
+    ctx.fillStyle = "#fff"; ctx.font = "800 15px -apple-system, system-ui, sans-serif";
+    ctx.textAlign = "center"; ctx.fillText(boss.name, p.x, p.y - R - 14); ctx.textAlign = "left";
+  }
+
+  function drawPlayer() {
+    var p = worldToScreen(player.x, player.y);
+    // flash while invulnerable after taking a hit
+    var flashing = player.hitTimer > 0 && Math.floor(player.hitTimer * 12) % 2 === 0;
+    var cls = player.tankClass ? CLASSES[player.tankClass] : null;
+    var R = ZS(player.radius);                 // body radius in screen px
+    var barrelBase = ZS(player.radius + 18);   // base barrel length in screen px
+    var wUnit = ZS(14);                         // base barrel width in screen px
+
+    // Stalker: fade the whole tank while invisible (idle). A faint outline
+    // stays so the local player can still find themselves.
+    ctx.save();
+    ctx.globalAlpha = player.invisAlpha;
+
+    // Rammer classes draw a slowly-spinning dark spike ring behind the body
+    // (spike count scales with the class) — the diep.io Smasher/Spike look.
+    if (cls && cls.rammer) {
+      ctx.save();
+      ctx.translate(p.x, p.y);
+      ctx.rotate(player.bodySpin);
+      ctx.beginPath();
+      var spikes = cls.spikes || 6, rOuter = R + ZS(7);
+      for (var k = 0; k < spikes; k++) {
+        var a = (k / spikes) * Math.PI * 2;
+        var sx = Math.cos(a) * rOuter, sy = Math.sin(a) * rOuter;
+        if (k === 0) ctx.moveTo(sx, sy); else ctx.lineTo(sx, sy);
+      }
+      ctx.closePath();
+      ctx.fillStyle = "#6f4a94";
+      ctx.fill();
+      ctx.restore();
+    }
+
+    // Barrel(s) — one shape per entry in the class's `barrels` array. Drawn in a
+    // frame rotated to turretAngle, so each barrel's own `a` rotates from
+    // "forward" (+x) and `off` shifts it laterally. `cone` draws a trapezoid.
+    var barrels = cls ? cls.barrels : DEFAULT_BARRELS;
+    if (barrels) {
+      ctx.save();
+      ctx.translate(p.x, p.y);
+      ctx.rotate(player.turretAngle);
+      ctx.fillStyle = "#8fa3b3";
+      for (var bi = 0; bi < barrels.length; bi++) {
+        var br = barrels[bi];
+        var bLen = barrelBase * (br.len || 1);
+        var bWid = wUnit * (br.w || 1);
+        var off = ZS(br.off || 0);
+        ctx.save();
+        ctx.rotate(br.a || 0);
+        if (br.cone) {
+          // Widening trapezoid: narrow at the hub, wide at the muzzle.
+          ctx.beginPath();
+          ctx.moveTo(0, off - bWid * 0.35);
+          ctx.lineTo(bLen, off - bWid * 0.5);
+          ctx.lineTo(bLen, off + bWid * 0.5);
+          ctx.lineTo(0, off + bWid * 0.35);
+          ctx.closePath();
+          ctx.fill();
+        } else {
+          ctx.fillRect(0, off - bWid / 2, bLen, bWid);
+        }
+        ctx.restore();
+      }
+      ctx.restore();
+    }
+
+    // Auto-turret barrel(s), aimed independently. For multiple turrets (Hybrid
+    // drones) they mount evenly around the body.
+    if (cls && cls.auto) {
+      var n = player.autoAngles.length;
+      for (var ai = 0; ai < n; ai++) {
+        var mount = n > 1 ? (ai / n) * Math.PI * 2 + player.bodySpin * 0.3 : 0;
+        var mx2 = p.x + Math.cos(mount) * (n > 1 ? R * 0.55 : 0);
+        var my2 = p.y + Math.sin(mount) * (n > 1 ? R * 0.55 : 0);
+        ctx.save();
+        ctx.translate(mx2, my2);
+        ctx.rotate(player.autoAngles[ai]);
+        ctx.fillStyle = "#6b7a88";
+        ctx.fillRect(0, -ZS(4), R + ZS(8), ZS(8));
+        ctx.restore();
+      }
+    }
+
+    // Body — in Teams mode the body/stroke take the team color; in FFA the
+    // class-based colors apply (cyan, or rammer purple).
+    var teamCol = TEAM[player.team] || TEAM.ffa;
+    var useTeam = gameMode === "teams";
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, R, 0, Math.PI * 2);
+    ctx.fillStyle = flashing ? "#ffffff" : (useTeam ? teamCol.body : (cls && cls.rammer ? "#b06fd6" : "#3fb6f0"));
+    ctx.fill();
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = useTeam ? teamCol.stroke : (cls && cls.rammer ? "#7a4fa0" : "#2a86ad");
+    ctx.stroke();
+
+    // Auto-turret hub(s) on top of the body so they read as mounted turrets.
+    if (cls && cls.auto) {
+      var n2 = player.autoAngles.length;
+      for (var hi = 0; hi < n2; hi++) {
+        var mnt = n2 > 1 ? (hi / n2) * Math.PI * 2 + player.bodySpin * 0.3 : 0;
+        var hx = p.x + Math.cos(mnt) * (n2 > 1 ? R * 0.55 : 0);
+        var hy = p.y + Math.sin(mnt) * (n2 > 1 ? R * 0.55 : 0);
+        ctx.beginPath();
+        ctx.arc(hx, hy, R * (n2 > 1 ? 0.3 : 0.5), 0, Math.PI * 2);
+        ctx.fillStyle = "#c9a0e8";
+        ctx.fill();
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = "#8a63b0";
+        ctx.stroke();
+      }
+    }
+    ctx.restore(); // end invisAlpha group
+
+    // HP bar above the tank (always full opacity so it stays readable).
+    var barW = R * 2.2;
+    var ratio = Math.max(player.hp / player.maxHp, 0);
+    ctx.fillStyle = "rgba(0,0,0,0.4)";
+    ctx.fillRect(p.x - barW / 2, p.y - R - 18, barW, 6);
+    ctx.fillStyle = ratio > 0.3 ? "#4caf50" : "#e05353";
+    ctx.fillRect(p.x - barW / 2, p.y - R - 18, barW * ratio, 6);
+
+    // Username plate above the tank.
+    ctx.globalAlpha = player.invisAlpha;
+    ctx.fillStyle = (TEAM[player.team] || TEAM.ffa).name;
+    ctx.font = "700 14px -apple-system, system-ui, sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText(player.name || "mango", p.x, p.y - R - 26);
+    ctx.textAlign = "left";
+    ctx.globalAlpha = 1;
+  }
+
+  function drawStick(stick, label) {
+    if (!stick.active) return;
+    ctx.beginPath();
+    ctx.arc(stick.originX, stick.originY, stick.maxRadius, 0, Math.PI * 2);
+    ctx.fillStyle = "rgba(255,255,255,0.10)";
+    ctx.fill();
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = "rgba(255,255,255,0.25)";
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.arc(stick.knobX, stick.knobY, 26, 0, Math.PI * 2);
+    ctx.fillStyle = "rgba(255,255,255,0.35)";
+    ctx.fill();
+  }
+
+  // Left inset for all top-left HUD/controls, honoring the notch safe area.
+  function hudPadX() { return 16 + safe.left; }
+  function hudPadY() { return 16 + safe.top; }
+
+  function drawHUD() {
+    // HP + level + XP bar, fixed in screen space (drawn outside the camera
+    // transform) so it never scrolls with the world, and positioned as a
+    // fraction of view size so it adapts to any screen/orientation.
+    var px = hudPadX(), py = hudPadY();
+    var barW = Math.min(280, view.w * 0.4);
+
+    ctx.font = "600 16px -apple-system, system-ui, sans-serif";
+    ctx.fillStyle = "#fff";
+    var title = "Level " + player.level;
+    if (player.tankClass) title += "  ·  " + CLASSES[player.tankClass].label;
+    ctx.fillText(title, px, py + 16);
+
+    // XP bar
+    var xpRatio = clamp(player.xp / player.xpToNext, 0, 1);
+    ctx.fillStyle = "rgba(0,0,0,0.4)";
+    ctx.fillRect(px, py + 24, barW, 8);
+    ctx.fillStyle = "#f2c14e";
+    ctx.fillRect(px, py + 24, barW * xpRatio, 8);
+
+    // HP bar
+    var hpRatio = clamp(player.hp / player.maxHp, 0, 1);
+    ctx.fillStyle = "rgba(0,0,0,0.4)";
+    ctx.fillRect(px, py + 40, barW, 10);
+    ctx.fillStyle = hpRatio > 0.3 ? "#4caf50" : "#e05353";
+    ctx.fillRect(px, py + 40, barW * hpRatio, 10);
+    ctx.fillStyle = "#fff";
+    ctx.font = "600 11px -apple-system, system-ui, sans-serif";
+    ctx.fillText(Math.max(0, Math.round(player.hp)) + " / " + player.maxHp, px, py + 60);
+  }
+
+  function roundRect(x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+  }
+
+  // Wraps text within maxWidth, drawing each line centered at cx starting at y.
+  // ctx.font/fillStyle/textAlign must already be set by the caller.
+  function wrapText(text, cx, y, maxWidth, lineHeight) {
+    var words = text.split(" ");
+    var line = "";
+    var ly = y;
+    for (var i = 0; i < words.length; i++) {
+      var test = line + words[i] + " ";
+      if (ctx.measureText(test).width > maxWidth && line !== "") {
+        ctx.fillText(line, cx, ly);
+        line = words[i] + " ";
+        ly += lineHeight;
+      } else {
+        line = test;
+      }
+    }
+    ctx.fillText(line, cx, ly);
+  }
+
+  // The Status button sits directly under the HP bar (HUD ends around
+  // py+63 — see drawHUD), collapsed by default. Recomputed each call so it
+  // stays correctly placed across resize/orientation/safe-area changes.
+  function getStatusButtonRect() {
+    return { x: hudPadX(), y: hudPadY() + 68, w: Math.min(130, view.w * 0.32), h: 32 };
+  }
+
+  function drawStatusButton() {
+    var r = getStatusButtonRect();
+    var hasPoints = player.skillPoints > 0;
+
+    roundRect(r.x, r.y, r.w, r.h, 8);
+    ctx.fillStyle = hasPoints ? "rgba(255,213,74,0.92)" : "rgba(255,255,255,0.10)";
+    ctx.fill();
+    ctx.lineWidth = hasPoints ? 2 : 1;
+    ctx.strokeStyle = hasPoints ? "#ffffff" : "rgba(255,255,255,0.2)";
+    ctx.stroke();
+
+    ctx.fillStyle = hasPoints ? "#0d0f14" : "rgba(255,255,255,0.6)";
+    ctx.font = "700 13px -apple-system, system-ui, sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText("Status" + (hasPoints ? " (" + player.skillPoints + ")" : ""), r.x + r.w / 2, r.y + r.h / 2 + 4);
+    ctx.textAlign = "left";
+  }
+
+  // The 8 stat-upgrade buttons, laid out as a compact 2-column grid (4 rows)
+  // directly below the Status button. Only meaningful (drawn/hit-tested) while
+  // the menu is open AND skill points are available — see drawUpgradeMenu /
+  // handleUiTap.
+  function getExpandedUpgradeButtons() {
+    var sb = getStatusButtonRect();
+    var gap = 7, bw = 108, bh = 36, cols = 2;
+    var startX = sb.x, startY = sb.y + sb.h + 8;
+    var rects = [];
+    for (var i = 0; i < UPGRADES.length; i++) {
+      var col = i % cols, row = Math.floor(i / cols);
+      rects.push({
+        def: UPGRADES[i],
+        x: startX + col * (bw + gap),
+        y: startY + row * (bh + gap),
+        w: bw,
+        h: bh
+      });
+    }
+    return rects;
+  }
+
+  function drawUpgradeMenu() {
+    if (!statusMenuOpen || player.skillPoints <= 0) return;
+    var rects = getExpandedUpgradeButtons();
+
+    for (var i = 0; i < rects.length; i++) {
+      var rb = rects[i];
+      var tier = player.stats[rb.def.key];
+      var maxed = tier >= player.maxTier;
+
+      roundRect(rb.x, rb.y, rb.w, rb.h, 6);
+      ctx.fillStyle = maxed ? "rgba(255,255,255,0.10)" : rb.def.color;
+      ctx.globalAlpha = maxed ? 1 : 0.92;
+      ctx.fill();
+      ctx.globalAlpha = 1;
+      ctx.lineWidth = maxed ? 1 : 2;
+      ctx.strokeStyle = maxed ? "rgba(255,255,255,0.2)" : "#ffffff";
+      ctx.stroke();
+
+      ctx.fillStyle = maxed ? "rgba(255,255,255,0.55)" : "#0d0f14";
+      ctx.font = "700 11px -apple-system, system-ui, sans-serif";
+      ctx.textAlign = "center";
+      ctx.fillText(rb.def.label, rb.x + rb.w / 2, rb.y + 15);
+      ctx.font = "600 10px -apple-system, system-ui, sans-serif";
+      ctx.fillText(maxed ? "MAX" : (tier + "/" + player.maxTier), rb.x + rb.w / 2, rb.y + 29);
+      ctx.textAlign = "left";
+    }
+  }
+
+  // Class-choice cards for the CURRENT evolution options (base classes at L15,
+  // otherwise the chosen class's next-tier upgrades). Laid out as a single row
+  // in landscape or a 2-column grid in portrait, centered on screen.
+  function getEvolutionCards() {
+    var opts = evolutionOptions();
+    var margin = 20, gap = 16;
+    var cols = view.w > view.h ? opts.length : Math.min(opts.length, 2);
+    cols = Math.max(cols, 1);
+    var rows = Math.ceil(opts.length / cols);
+    var cw = (view.w - margin * 2 - gap * (cols - 1)) / cols;
+    var ch = Math.min(170, (view.h - margin * 2 - gap * (rows - 1)) / rows);
+    var totalW = cw * cols + gap * (cols - 1);
+    var totalH = ch * rows + gap * (rows - 1);
+    var startX = (view.w - totalW) / 2;
+    var startY = (view.h - totalH) / 2;
+    var cards = [];
+    for (var i = 0; i < opts.length; i++) {
+      var col = i % cols, row = Math.floor(i / cols);
+      var key = opts[i];
+      cards.push({
+        key: key,
+        def: CLASSES[key],
+        x: startX + col * (cw + gap),
+        y: startY + row * (ch + gap),
+        w: cw,
+        h: ch
+      });
+    }
+    return cards;
+  }
+
+  function drawEvolutionOverlay() {
+    ctx.fillStyle = "rgba(5,6,10,0.88)";
+    ctx.fillRect(0, 0, view.w, view.h);
+
+    var cards = getEvolutionCards();
+
+    ctx.textAlign = "center";
+    ctx.fillStyle = "#fff";
+    ctx.font = "700 20px -apple-system, system-ui, sans-serif";
+    var tierNum = player.classTier + 1; // the tier being chosen
+    ctx.fillText("Evolve — Tier " + tierNum + " (Level " + player.level + ")", view.w / 2, Math.max(28 + safe.top, cards[0].y - 20));
+
+    for (var i = 0; i < cards.length; i++) {
+      var c = cards[i];
+      roundRect(c.x, c.y, c.w, c.h, 10);
+      ctx.fillStyle = c.def.color;
+      ctx.globalAlpha = 0.92;
+      ctx.fill();
+      ctx.globalAlpha = 1;
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = "#ffffff";
+      ctx.stroke();
+
+      ctx.fillStyle = "#0d0f14";
+      ctx.font = "700 16px -apple-system, system-ui, sans-serif";
+      ctx.fillText(c.def.label, c.x + c.w / 2, c.y + 28);
+      ctx.font = "500 12px -apple-system, system-ui, sans-serif";
+      wrapText(c.def.desc, c.x + c.w / 2, c.y + 50, c.w - 20, 15);
+    }
+    ctx.textAlign = "left";
+  }
+
+  // Remote players/bullets from the multiplayer scaffold. No-ops while offline
+  // (maps stay empty), so this is free in single-player.
+  // Live remote players (real friends): full tank with class barrels, team
+  // colour, nameplate, level, and HP bar.
+  function drawRemotePlayers() {
+    for (var ri = 0; ri < remotes.length; ri++) {
+      var rp = remotes[ri];
+      var p = worldToScreen(rp.x, rp.y);
+      if (p.x < -80 || p.x > view.w + 80 || p.y < -80 || p.y > view.h + 80) continue;
+      var rcls = rp.cls && CLASSES[rp.cls] ? CLASSES[rp.cls] : null;
+      var col = TEAM[rp.team] || TEAM.ffa;
+      var R = ZS(rp.radius || PLAYER_BASE.radius);
+      // barrels (from the class pattern) or rammer spike ring
+      if (rcls && rcls.rammer) {
+        ctx.save(); ctx.translate(p.x, p.y);
+        ctx.beginPath();
+        var spikes = rcls.spikes || 6, rO = R + ZS(7);
+        for (var s = 0; s < spikes; s++) { var a2 = (s / spikes) * Math.PI * 2; var sx = Math.cos(a2) * rO, sy = Math.sin(a2) * rO; if (s === 0) ctx.moveTo(sx, sy); else ctx.lineTo(sx, sy); }
+        ctx.closePath(); ctx.fillStyle = "#6f4a94"; ctx.fill(); ctx.restore();
+      } else {
+        var barrels = rcls ? rcls.barrels : DEFAULT_BARRELS;
+        ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(rp.a || 0);
+        ctx.fillStyle = "#8fa3b3";
+        for (var bi2 = 0; bi2 < barrels.length; bi2++) {
+          var br = barrels[bi2];
+          ctx.save(); ctx.rotate(br.a || 0);
+          ctx.fillRect(0, ZS(br.off || 0) - ZS(14 * (br.w || 1)) / 2, ZS((PLAYER_BASE.radius + 18) * (br.len || 1)), ZS(14 * (br.w || 1)));
+          ctx.restore();
+        }
+        ctx.restore();
+      }
+      // body
+      ctx.beginPath(); ctx.arc(p.x, p.y, R, 0, Math.PI * 2);
+      ctx.fillStyle = rcls && rcls.rammer ? "#b06fd6" : col.body; ctx.fill();
+      ctx.lineWidth = 3; ctx.strokeStyle = col.stroke; ctx.stroke();
+      // HP bar
+      if (rp.hp !== undefined && rp.maxHp) {
+        var bw = R * 2.2, ratio = Math.max(rp.hp / rp.maxHp, 0);
+        ctx.fillStyle = "rgba(0,0,0,0.4)"; ctx.fillRect(p.x - bw / 2, p.y - R - 12, bw, 5);
+        ctx.fillStyle = "#4caf50"; ctx.fillRect(p.x - bw / 2, p.y - R - 12, bw * ratio, 5);
+      }
+      // nameplate (+ level)
+      ctx.fillStyle = col.name;
+      ctx.font = "700 13px -apple-system, system-ui, sans-serif";
+      ctx.textAlign = "center";
+      ctx.fillText((rp.name || "player") + "  ·  Lv" + (rp.level || 1), p.x, p.y - R - 20);
+      ctx.textAlign = "left";
+    }
+  }
+
+  function drawRemoteBullets() {
+    for (var i = 0; i < remoteBullets.length; i++) {
+      var b = remoteBullets[i];
+      var p = worldToScreen(b.x, b.y);
+      if (p.x < -40 || p.x > view.w + 40 || p.y < -40 || p.y > view.h + 40) continue;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, ZS(b.radius || 6), 0, Math.PI * 2);
+      ctx.fillStyle = b.color || "#ffd0c0";
+      ctx.fill();
+    }
+  }
+
+  // Top-right minimap: scales the 6000² world into a small square, honoring the
+  // notch safe area. Shows the player, remote players (team-coloured), and a
+  // pulsing skull at the boss.
+  function getMinimapRect() {
+    var size = Math.min(140, view.w * 0.28);
+    return { x: view.w - size - 12 - safe.right, y: 12 + safe.top, w: size, h: size };
+  }
+  function drawSkull(cx, cy, r, alpha) {
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = "#ffffff";
+    ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fill();       // cranium
+    ctx.fillRect(cx - r * 0.8, cy, r * 1.6, r * 0.9);                       // jaw
+    ctx.fillStyle = "#111";
+    ctx.beginPath(); ctx.arc(cx - r * 0.4, cy - r * 0.1, r * 0.28, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(cx + r * 0.4, cy - r * 0.1, r * 0.28, 0, Math.PI * 2); ctx.fill();
+    ctx.fillRect(cx - r * 0.12, cy + r * 0.2, r * 0.24, r * 0.5);           // nose
+    ctx.restore();
+  }
+  function drawMinimap() {
+    var m = getMinimapRect();
+    ctx.fillStyle = "rgba(20,26,38,0.55)";
+    ctx.fillRect(m.x, m.y, m.w, m.h);
+    ctx.lineWidth = 2; ctx.strokeStyle = "rgba(255,255,255,0.25)";
+    ctx.strokeRect(m.x, m.y, m.w, m.h);
+    var sx = m.w / WORLD.w, sy = m.h / WORLD.h;
+    // remote players (real friends), colour-coded by team
+    for (var i = 0; i < remotes.length; i++) {
+      var rp = remotes[i];
+      ctx.fillStyle = (TEAM[rp.team] || TEAM.ffa).body;
+      ctx.beginPath(); ctx.arc(m.x + rp.x * sx, m.y + rp.y * sy, 3, 0, Math.PI * 2); ctx.fill();
+    }
+    // player
+    ctx.fillStyle = gameMode === "teams" ? (TEAM[player.team] || TEAM.ffa).name : "#ffffff";
+    ctx.beginPath(); ctx.arc(m.x + player.x * sx, m.y + player.y * sy, 4, 0, Math.PI * 2); ctx.fill();
+    ctx.lineWidth = 1.5; ctx.strokeStyle = "#000"; ctx.stroke();
+    // boss skull (pulsing)
+    if (boss) {
+      var pulse = 0.55 + 0.45 * Math.sin(performance.now() / 180);
+      drawSkull(m.x + boss.x * sx, m.y + boss.y * sy, 7, pulse);
+    }
+  }
+
+  function drawBossHealthBar() {
+    if (!boss) return;
+    // Only when the player is near the center arena.
+    if (Math.hypot(boss.x - player.x, boss.y - player.y) > BOSS_NEAR_DIST) return;
+    var w = Math.min(460, view.w * 0.7), h = 18;
+    var x = (view.w - w) / 2, y = 14 + safe.top;
+    ctx.fillStyle = "#fff"; ctx.font = "800 15px -apple-system, system-ui, sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText(boss.name, view.w / 2, y - 4);
+    ctx.fillStyle = "rgba(0,0,0,0.5)"; ctx.fillRect(x, y, w, h);
+    var ratio = Math.max(boss.hp / boss.maxHp, 0);
+    ctx.fillStyle = "#e0455a"; ctx.fillRect(x, y, w * ratio, h);
+    ctx.lineWidth = 2; ctx.strokeStyle = "rgba(255,255,255,0.35)"; ctx.strokeRect(x, y, w, h);
+    ctx.textAlign = "left";
+  }
+
+  function drawBossWarning() {
+    if (boss || !bossWarningActive) return;
+    if (Math.floor(performance.now() / 400) % 2 === 0) return; // blink
+    ctx.fillStyle = "#ff5a5a";
+    ctx.font = "800 " + Math.round(Math.min(26, view.w * 0.045)) + "px -apple-system, system-ui, sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText("WARNING: A Legendary Boss is spawning at the center!", view.w / 2, view.h * 0.16 + safe.top);
+    ctx.textAlign = "left";
+  }
+
+  function drawNotif() {
+    if (notif.timer <= 0) return;
+    ctx.globalAlpha = Math.min(1, notif.timer);
+    ctx.fillStyle = "#ffd54a";
+    ctx.font = "800 18px -apple-system, system-ui, sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText(notif.text, view.w / 2, view.h * 0.24 + safe.top);
+    ctx.textAlign = "left";
+    ctx.globalAlpha = 1;
+  }
+
+  // Live scoreboard (top-centre): local player + connected friends, by score.
+  function drawLeaderboard() {
+    if (!NET.connected && remotes.length === 0) return; // solo -> skip
+    var list = [{ name: player.name, score: player.score || 0, team: player.team, me: true }];
+    for (var i = 0; i < remotes.length; i++) {
+      list.push({ name: remotes[i].name, score: remotes[i].score || 0, team: remotes[i].team });
+    }
+    list.sort(function (a, b) { return b.score - a.score; });
+    var rows = Math.min(list.length, 6);
+    var x = view.w / 2, y = safe.top + 30;
+    ctx.textAlign = "center";
+    ctx.font = "700 12px -apple-system, system-ui, sans-serif";
+    ctx.fillStyle = "rgba(255,255,255,0.55)";
+    ctx.fillText(NET.connected ? "PLAYERS ONLINE" : "SCORE", x, y);
+    for (var r = 0; r < rows; r++) {
+      var e = list[r];
+      ctx.fillStyle = (TEAM[e.team] || TEAM.ffa).name;
+      ctx.font = (e.me ? "800 " : "600 ") + "13px -apple-system, system-ui, sans-serif";
+      ctx.fillText((e.name || "player") + "  " + e.score, x, y + 16 + r * 16);
+    }
+    ctx.textAlign = "left";
+  }
+
+  // Compact "next boss" countdown, pinned to the bottom-right corner and kept
+  // small/low-contrast so it never blocks the view. Safe-area aware for phones.
+  function drawBossCountdown() {
+    var label;
+    if (boss) {
+      label = "Boss: LIVE";
+    } else {
+      var t = Math.max(0, Math.ceil(bossTimer));
+      var mm = Math.floor(t / 60), ss = t % 60;
+      label = "Next Boss: " + (mm < 10 ? "0" + mm : mm) + ":" + (ss < 10 ? "0" + ss : ss);
+    }
+    var color = (boss || bossWarningActive) ? "#ff6b6b" : "rgba(255,255,255,0.85)";
+    var padX = 8, padY = 4, h = 20, gap = 10;
+    ctx.font = "700 12px -apple-system, system-ui, sans-serif";
+    var w = ctx.measureText(label).width;
+    var right = view.w - gap - safe.right;
+    var bottom = view.h - gap - safe.bottom;
+    var boxX = right - w - padX * 2, boxY = bottom - h;
+    // subtle backing pill so the text stays readable over the world
+    ctx.fillStyle = "rgba(12,16,24,0.42)";
+    roundRect(boxX, boxY, w + padX * 2, h, 6);
+    ctx.fill();
+    ctx.fillStyle = color;
+    ctx.textAlign = "right";
+    ctx.textBaseline = "middle";
+    ctx.fillText(label, right - padX, boxY + h / 2 + 0.5);
+    ctx.textAlign = "left";
+    ctx.textBaseline = "alphabetic";
+  }
+
+  // Sandbox control panel: two stacked buttons tucked under the minimap on the
+  // right edge, so they clear the HP HUD (top-left), joysticks (bottom corners)
+  // and the boss countdown (bottom-right). Safe-area aware via getMinimapRect().
+  function getSandboxButtons() {
+    var mm = getMinimapRect();
+    var bw = Math.max(mm.w, 96), bh = 34, gap = 8;
+    var x = view.w - bw - 12 - safe.right;
+    var y0 = mm.y + mm.h + 12;
+    return [
+      { key: "max",   label: "Max Level",   x: x, y: y0,            w: bw, h: bh },
+      { key: "reset", label: "Reset Level", x: x, y: y0 + bh + gap, w: bw, h: bh }
+    ];
+  }
+  function drawSandboxPanel() {
+    var btns = getSandboxButtons();
+    ctx.font = "700 11px -apple-system, system-ui, sans-serif";
+    ctx.fillStyle = "rgba(255,255,255,0.55)";
+    ctx.textAlign = "right";
+    ctx.fillText("SANDBOX", btns[0].x + btns[0].w, btns[0].y - 5);
+    for (var i = 0; i < btns.length; i++) {
+      var b = btns[i];
+      roundRect(b.x, b.y, b.w, b.h, 8);
+      ctx.fillStyle = b.key === "reset" ? "rgba(224,83,83,0.90)" : "rgba(63,182,240,0.92)";
+      ctx.fill();
+      ctx.lineWidth = 1.5; ctx.strokeStyle = "rgba(255,255,255,0.35)"; ctx.stroke();
+      ctx.fillStyle = "#0d0f14";
+      ctx.font = "700 13px -apple-system, system-ui, sans-serif";
+      ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      ctx.fillText(b.label, b.x + b.w / 2, b.y + b.h / 2 + 0.5);
+      ctx.textBaseline = "alphabetic";
+    }
+    ctx.textAlign = "left";
+  }
+
+  function render() {
+    ctx.clearRect(0, 0, view.w, view.h);
+    ctx.fillStyle = "#12141a";
+    ctx.fillRect(0, 0, view.w, view.h);
+
+    drawGrid();
+    drawWorldBounds();
+    drawShapes();
+    drawRemoteBullets();
+    drawBullets();
+    drawDrones();
+    drawRemotePlayers();
+    drawBoss();
+    drawPlayer();
+
+    // Screen-space overlays.
+    drawMinimap();
+    drawBossHealthBar();
+    drawBossWarning();
+    drawLeaderboard();
+    drawNotif();
+
+    // In-game touch controls / HUD only while actually playing.
+    if (gameState === "playing") {
+      drawStick(moveStick);
+      drawStick(aimStick);
+      drawHUD();
+      drawStatusButton();
+      drawBossCountdown();
+      if (gameMode === "sandbox") drawSandboxPanel();
+      drawUpgradeMenu();
+      if (player.evolutionPending) drawEvolutionOverlay();
+    }
+  }
+
+  // ======================================================================
+  // 8. MAIN LOOP
+  //    dt is clamped so a backgrounded tab / dev-tools pause doesn't cause
+  //    a huge simulation step (e.g. tank flying through walls) on resume.
+  // ======================================================================
+  var lastTime = performance.now();
+
+  function frame(now) {
+    var dt = Math.min((now - lastTime) / 1000, 1 / 30);
+    lastTime = now;
+
+    updatePlayer(dt);
+    updateBoss(dt);
+    updateDrones(dt);
+    updateBullets(dt);
+    updateShapes(dt);
+    updateRemotes(dt);        // interpolate remote players toward server state
+    updateRemoteBullets(dt);  // peers' shots (damage the local player)
+    checkCollisions();
+    checkCombat(dt);
+    updateCamera(dt);
+    if (notif.timer > 0) notif.timer -= dt;
+    NET.update(dt);           // sync our state to the server (no-op while solo)
+
+    render();
+
+    requestAnimationFrame(frame);
+  }
+
+  // ======================================================================
+  // 9. LOBBY / MAIN MENU
+  // ======================================================================
+  var lobbyEl = document.getElementById("lobby");
+  var modeSel = document.getElementById("modeSel");
+  var teamRow = document.getElementById("teamRow");
+  var teamWarn = document.getElementById("teamWarn");
+  var nameInput = document.getElementById("nameInput");
+  var playBtn = document.getElementById("playBtn");
+  var lobbyTeamChoice = "red";
+
+  // Team picker: show only in 2 Teams mode. Actual balancing is done by the
+  // server on join (it may reassign you to the smaller side — see NET welcome).
+  function refreshTeamUI() {
+    var teams = gameMode === "teams";
+    teamRow.style.display = teams ? "flex" : "none";
+    teamWarn.textContent = teams ? "Server auto-balances teams on join." : "";
+    if (!teams) return;
+    var btns = teamRow.querySelectorAll(".teamBtn");
+    for (var i = 0; i < btns.length; i++) {
+      var t = btns[i].getAttribute("data-team");
+      btns[i].classList.toggle("selected", lobbyTeamChoice === t);
+    }
+  }
+  function parseMode(v) { return v === "teams" ? "teams" : (v === "sandbox" ? "sandbox" : "ffa"); }
+  modeSel.addEventListener("change", function () {
+    gameMode = parseMode(modeSel.value);
+    refreshTeamUI();
+  });
+  teamRow.addEventListener("click", function (e) {
+    var btn = e.target.closest ? e.target.closest(".teamBtn") : null;
+    if (!btn) return;
+    lobbyTeamChoice = btn.getAttribute("data-team");
+    refreshTeamUI();
+  });
+  function startGame() {
+    playerName = (nameInput.value || "").trim().slice(0, 16) || "mango";
+    gameMode = parseMode(modeSel.value);
+    playerTeam = gameMode === "teams" ? lobbyTeamChoice : "ffa";
+    // Fresh player with the chosen identity.
+    Object.assign(player, makePlayer());
+    bossTimer = BOSS_INTERVAL; boss = null; drones = []; bossWarningActive = false;
+    remotes = []; remoteBullets = [];
+    notif = { text: "", timer: 0 };
+    gameState = "playing";
+    lobbyEl.classList.add("hidden");
+    // Sandbox is a private, offline testbed — stay solo. Otherwise connect to
+    // the multiplayer server (a no-op if no server URL is configured).
+    if (gameMode !== "sandbox") NET.start();
+  }
+  playBtn.addEventListener("click", startGame);
+  refreshTeamUI();
+
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

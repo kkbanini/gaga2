@@ -1,0 +1,53 @@
+name: Deploy OTA assets to GitHub Pages
+
+# Publishes the /docs folder (version.json + game.html) to a `gh-pages` branch,
+# which GitHub Pages then serves at https://<owner>.github.io/<repo>/.
+#
+# This uses a plain git push (not the GitHub Actions Pages deployment API), so
+# it succeeds with the default GITHUB_TOKEN and does NOT require Pages to be
+# pre-enabled — the workflow stays green and simply publishes the branch.
+#
+# One-time setup by the repo owner: Settings -> Pages -> Build and deployment ->
+# Source: "Deploy from a branch" -> Branch: gh-pages / (root). After that, every
+# push touching docs/ republishes the OTA assets.
+
+on:
+  push:
+    branches:
+      - claude/diep-io-mobile-game-j3hy0u
+      - main
+    paths:
+      - "docs/**"
+      - ".github/workflows/deploy-pages.yml"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write   # needed to push the gh-pages branch
+
+concurrency:
+  group: pages-deploy
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Publish docs/ to gh-pages branch
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          # .nojekyll stops GitHub Pages' Jekyll from touching the assets.
+          touch docs/.nojekyll
+          cd docs
+          git init -q
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -q -m "Deploy OTA assets (${GITHUB_SHA::7})"
+          git branch -M gh-pages
+          git push -f "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" gh-pages
+          echo "Published docs/ to the gh-pages branch."

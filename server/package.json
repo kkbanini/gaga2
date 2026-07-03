@@ -1,0 +1,16 @@
+{
+  "name": "tank-arena-server",
+  "version": "1.3.0",
+  "private": true,
+  "description": "Real-time multiplayer relay server for Tank Arena (docs/game.html).",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}

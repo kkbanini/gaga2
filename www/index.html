@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<!--
+  Loosened CSP: explicitly allow embedding the game in an iframe (frame-src /
+  child-src), executing inline/blob scripts, and fetching the OTA assets from
+  GitHub Pages (connect-src including https://*.github.io). Kept permissive so a
+  restrictive WebView default can never block the boot / download.
+-->
+<meta http-equiv="Content-Security-Policy" content="default-src * data: blob: 'unsafe-inline' 'unsafe-eval'; script-src * data: blob: 'unsafe-inline' 'unsafe-eval'; style-src * data: blob: 'unsafe-inline'; img-src * data: blob:; font-src * data: blob:; connect-src * data: blob: https://*.github.io; frame-src * data: blob:; child-src * data: blob:;">
+<!--
+  OTA BOOTSTRAPPER
+  ================
+  This is the ONLY file compiled into the APK's shell (plus a bundled fallback
+  copy of the game at www/game.html). It never contains game logic itself — it
+  boots the game over-the-air:
+    1. Show a full-screen loading overlay.
+    2. Fetch version.json from the live GitHub Pages site.
+    3. Compare the remote version to the one cached locally (Cache Storage,
+       falling back to localStorage).
+    4. If newer, download game.html (with a progress bar + cache-busting),
+       cache it, then boot it.
+    5. If up-to-date / offline / any failure, boot the last cached copy, or the
+       bundled fallback on a fresh offline first-run.
+  Because the bundled fallback always works, the APK is never broken even before
+  GitHub Pages is live — OTA simply activates once the endpoint is reachable.
+-->
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, minimum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="mobile-web-app-capable" content="yes">
+<title>Tank Arena</title>
+<style>
+  :root { --accent: #3fb6f0; --accent2: #b06fd6; }
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    position: fixed; top: 0; left: 0; overflow: hidden;
+    background: #0d0f14;
+    touch-action: none;
+    -webkit-user-select: none; user-select: none;
+    -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent;
+    overscroll-behavior: none;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  }
+  /* The booted game lives in this full-screen iframe. */
+  #gameframe {
+    position: fixed; inset: 0; width: 100%; height: 100%;
+    border: 0; margin: 0; padding: 0; display: block;
+    background: #12141a;
+  }
+  /* Full-screen loading overlay. */
+  #overlay {
+    position: fixed; inset: 0; z-index: 10;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    gap: 22px;
+    padding: calc(24px + env(safe-area-inset-top)) 24px calc(24px + env(safe-area-inset-bottom));
+    background:
+      radial-gradient(120% 80% at 50% 0%, #1a2030 0%, #0d0f14 60%, #08090d 100%);
+    color: #eef2f6;
+    transition: opacity 0.35s ease;
+  }
+  #overlay.hidden { opacity: 0; pointer-events: none; }
+  .logo {
+    font-size: clamp(30px, 8vw, 54px);
+    font-weight: 800; letter-spacing: 0.5px;
+    background: linear-gradient(90deg, var(--accent), var(--accent2));
+    -webkit-background-clip: text; background-clip: text;
+    -webkit-text-fill-color: transparent;
+    text-align: center; line-height: 1.05;
+  }
+  .tagline { font-size: 13px; color: #8b96a5; margin-top: -12px; letter-spacing: 2px; text-transform: uppercase; }
+  .bar-wrap {
+    width: min(320px, 78vw); height: 12px; border-radius: 999px;
+    background: rgba(255,255,255,0.10);
+    overflow: hidden; position: relative;
+    box-shadow: inset 0 0 0 1px rgba(255,255,255,0.08);
+  }
+  .bar-fill {
+    position: absolute; left: 0; top: 0; bottom: 0; width: 0%;
+    border-radius: 999px;
+    background: linear-gradient(90deg, var(--accent), var(--accent2));
+    transition: width 0.18s ease;
+  }
+  /* Indeterminate sweep used before we know the download size. */
+  .bar-wrap.indet .bar-fill {
+    width: 40%; animation: sweep 1.1s ease-in-out infinite;
+  }
+  @keyframes sweep {
+    0%   { left: -42%; }
+    100% { left: 100%; }
+  }
+  #status { font-size: 15px; color: #c7d0da; min-height: 20px; text-align: center; }
+  #pct { font-size: 13px; color: #8b96a5; font-variant-numeric: tabular-nums; }
+  #verline {
+    position: fixed; bottom: calc(14px + env(safe-area-inset-bottom));
+    left: 0; right: 0; text-align: center;
+    font-size: 11px; color: #5c6672; letter-spacing: 0.5px;
+  }
+  .spinner {
+    width: 34px; height: 34px; border-radius: 50%;
+    border: 3px solid rgba(255,255,255,0.15);
+    border-top-color: var(--accent);
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<div id="overlay">
+  <div class="logo">TANK<br>ARENA</div>
+  <div class="tagline">Loading</div>
+  <div class="spinner" id="spinner"></div>
+  <div class="bar-wrap indet" id="bar"><div class="bar-fill" id="barFill"></div></div>
+  <div id="status">Starting…</div>
+  <div id="pct"></div>
+  <div id="verline"></div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  // ===== OTA configuration =====================================================
+  // Where version.json and game.html are hosted. GitHub Pages serving the repo's
+  // /docs folder exposes them at the repo site root. Override at runtime by
+  // defining window.OTA_BASE_URL before this script runs.
+  var OTA_BASE = (window.OTA_BASE_URL || "https://kkbanini.github.io/gaga2/").replace(/\/?$/, "/");
+  // Version of the game.html bundled inside the APK (www/game.html). OTA only
+  // downloads when the remote version is newer than this / the cached one.
+  var BUNDLED_VERSION = "1.4.0";
+  var CACHE_NAME = "tank-arena-ota-v1";
+  var VERSION_TIMEOUT_MS = 6000; // don't make offline users wait long
+  var MIN_OVERLAY_MS = 650;      // avoid a jarring flash on fast boots
+  var BOOT_ESCAPE_MS = 2500;     // if the game hasn't confirmed by now, force-boot the bundled copy
+
+  // ===== DOM helpers ===========================================================
+  var overlay = document.getElementById("overlay");
+  var barWrap = document.getElementById("bar");
+  var barFill = document.getElementById("barFill");
+  var statusEl = document.getElementById("status");
+  var pctEl = document.getElementById("pct");
+  var verEl = document.getElementById("verline");
+  var spinner = document.getElementById("spinner");
+  var startedAt = Date.now();
+
+  function setStatus(txt) { statusEl.textContent = txt; }
+  function setVersionLine(txt) { verEl.textContent = txt; }
+  function setIndeterminate(on) {
+    if (on) { barWrap.classList.add("indet"); barFill.style.width = ""; pctEl.textContent = ""; }
+    else { barWrap.classList.remove("indet"); }
+  }
+  function setProgress(frac) {
+    // frac null -> indeterminate; 0..1 -> determinate
+    if (frac == null) { setIndeterminate(true); return; }
+    setIndeterminate(false);
+    var p = Math.max(0, Math.min(1, frac));
+    barFill.style.width = (p * 100).toFixed(0) + "%";
+    pctEl.textContent = (p * 100).toFixed(0) + "%";
+  }
+
+  // ===== Local storage of the cached game ======================================
+  // Prefer the Cache Storage API; fall back to localStorage if it's unavailable
+  // (e.g. an insecure-context WebView). Version string is always kept in
+  // localStorage for a cheap synchronous read.
+  function cachedVersion() {
+    try { return localStorage.getItem("ota_version"); } catch (e) { return null; }
+  }
+
+  function saveGame(version, html) {
+    try { localStorage.setItem("ota_version", version); } catch (e) {}
+    if (window.caches) {
+      return caches.open(CACHE_NAME).then(function (cache) {
+        return cache.put("game.html", new Response(html, { headers: { "Content-Type": "text/html" } }));
+      }).catch(function () {
+        // Cache write failed — fall back to localStorage.
+        try { localStorage.setItem("ota_game_html", html); } catch (e) {}
+      });
+    }
+    try { localStorage.setItem("ota_game_html", html); } catch (e) {}
+    return Promise.resolve();
+  }
+
+  function loadCachedGame() {
+    if (window.caches) {
+      return caches.open(CACHE_NAME).then(function (cache) {
+        return cache.match("game.html");
+      }).then(function (res) {
+        if (res) return res.text();
+        try { return localStorage.getItem("ota_game_html"); } catch (e) { return null; }
+      }).catch(function () {
+        try { return localStorage.getItem("ota_game_html"); } catch (e) { return null; }
+      });
+    }
+    try { return Promise.resolve(localStorage.getItem("ota_game_html")); } catch (e) { return Promise.resolve(null); }
+  }
+
+  // ===== Networking ============================================================
+  function fetchJSON(url, timeoutMs) {
+    var ctrl = new AbortController();
+    var timer = setTimeout(function () { ctrl.abort(); }, timeoutMs);
+    return fetch(url, { cache: "no-store", signal: ctrl.signal })
+      .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+      .finally(function () { clearTimeout(timer); });
+  }
+
+  // Download text with a byte-accurate progress bar when Content-Length is
+  // known; otherwise report indeterminate progress.
+  function fetchTextWithProgress(url, onProgress) {
+    return fetch(url, { cache: "no-store" }).then(function (res) {
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      var len = +(res.headers.get("Content-Length") || 0);
+      if (!res.body || !len || !res.body.getReader) {
+        onProgress(null);
+        return res.text();
+      }
+      var reader = res.body.getReader();
+      var received = 0;
+      var chunks = [];
+      return (function pump() {
+        return reader.read().then(function (r) {
+          if (r.done) {
+            var all = new Uint8Array(received), pos = 0;
+            for (var i = 0; i < chunks.length; i++) { all.set(chunks[i], pos); pos += chunks[i].length; }
+            return new TextDecoder("utf-8").decode(all);
+          }
+          chunks.push(r.value);
+          received += r.value.length;
+          onProgress(received / len);
+          return pump();
+        });
+      })();
+    });
+  }
+
+  // ===== Version comparison ("1.0.10" > "1.0.9") ==============================
+  function compareVersions(a, b) {
+    var pa = String(a).split("."), pb = String(b).split(".");
+    var n = Math.max(pa.length, pb.length);
+    for (var i = 0; i < n; i++) {
+      var x = parseInt(pa[i] || "0", 10) || 0;
+      var y = parseInt(pb[i] || "0", 10) || 0;
+      if (x > y) return 1;
+      if (x < y) return -1;
+    }
+    return 0;
+  }
+
+  // ===== Booting the game ======================================================
+  var booted = false;          // a boot was initiated (an iframe was mounted)
+  var bootConfirmed = false;   // the game iframe fired onload
+  var escaped = false;         // the safety fallback already ran
+  var overlayGone = false;
+
+  function hideOverlay() {
+    if (overlayGone) return;
+    overlayGone = true;
+    overlay.classList.add("hidden");
+    setTimeout(function () { if (overlay.parentNode) overlay.parentNode.removeChild(overlay); }, 400);
+  }
+  function hideOverlaySoon() {
+    var wait = Math.max(0, MIN_OVERLAY_MS - (Date.now() - startedAt));
+    setTimeout(hideOverlay, wait);
+  }
+
+  // Mount (or replace) the game iframe. Sandboxed but same-origin so the game's
+  // own touch/canvas APIs work; wrapped so a DOM/CORS restriction can't hang us.
+  function mountIframe(src) {
+    try {
+      var old = document.getElementById("gameframe");
+      if (old && old.parentNode) old.parentNode.removeChild(old);
+      var iframe = document.createElement("iframe");
+      iframe.id = "gameframe";
+      iframe.setAttribute("allow", "fullscreen; autoplay");
+      iframe.setAttribute("sandbox", "allow-scripts allow-same-origin allow-modals allow-pointer-lock");
+      iframe.onload = function () { bootConfirmed = true; hideOverlaySoon(); };
+      iframe.onerror = function () { forceEscape("iframe error"); };
+      iframe.src = src;
+      document.body.insertBefore(iframe, overlay);
+    } catch (e) {
+      forceEscape("mount error: " + (e && e.message));
+    }
+  }
+
+  // Safety fail-safe: if the game hasn't confirmed within BOOT_ESCAPE_MS, or any
+  // boot error fires, bypass the iframe cache/blob path and boot the bundled
+  // local game.html straight from the APK, then reveal it no matter what — the
+  // player is never trapped on the loading screen.
+  function armWatchdog() {
+    setTimeout(function () {
+      if (!bootConfirmed) forceEscape("watchdog timeout (stuck at Starting…)");
+    }, BOOT_ESCAPE_MS);
+  }
+  function forceEscape(reason) {
+    if (bootConfirmed) { hideOverlay(); return; }
+    if (escaped) { hideOverlay(); return; }
+    escaped = true;
+    try { if (window.console) console.warn("OTA boot fail-safe:", reason); } catch (e) {}
+    booted = true;
+    setStatus("Starting bundled version…");
+    mountIframe("game.html?ts=" + Date.now()); // direct same-origin bundled copy
+    // Reveal within a short grace whether or not this iframe's onload fires.
+    setTimeout(hideOverlay, 1000);
+  }
+
+  function bootHtml(html) {
+    if (booted) return;
+    booted = true;
+    try {
+      // Blob URL keeps the cached game a same-origin document so its own
+      // Cache/touch/canvas APIs behave exactly as when served directly.
+      var blob = new Blob([html], { type: "text/html" });
+      mountIframe(URL.createObjectURL(blob));
+      armWatchdog();
+    } catch (e) {
+      forceEscape("bootHtml: " + (e && e.message));
+    }
+  }
+
+  function bootBundled() {
+    if (booted) return;
+    booted = true;
+    mountIframe("game.html?ts=" + Date.now()); // fallback packaged in the APK
+    armWatchdog();
+  }
+
+  // Any uncaught error before the game confirms -> escape to the bundled copy.
+  window.addEventListener("error", function (ev) {
+    if (!bootConfirmed) forceEscape("window.onerror: " + (ev && ev.message));
+  });
+  window.addEventListener("unhandledrejection", function () {
+    if (!bootConfirmed && booted) forceEscape("unhandledrejection");
+  });
+
+  // ===== Orchestration =========================================================
+  function start() {
+    setStatus("Checking for updates…");
+    setProgress(null);
+    // Global cap: even if the version/download promises hang and boot is never
+    // reached, escape to the bundled game so the loader can't freeze forever.
+    setTimeout(function () {
+      if (!booted && !escaped) forceEscape("global cap: boot never reached");
+    }, VERSION_TIMEOUT_MS + 3000);
+
+    var remotePromise = fetchJSON(OTA_BASE + "version.json?t=" + Date.now(), VERSION_TIMEOUT_MS)
+      .catch(function () { return null; }); // offline / not-yet-hosted -> null
+
+    Promise.all([remotePromise, loadCachedGame()]).then(function (arr) {
+      var remote = arr[0];
+      var cachedHtml = arr[1];
+      var localVer = cachedHtml ? (cachedVersion() || BUNDLED_VERSION) : BUNDLED_VERSION;
+
+      setVersionLine("v" + localVer + (remote && remote.version ? "  →  latest v" + remote.version : "  ·  offline"));
+
+      var needUpdate = remote && remote.version &&
+        (!cachedHtml ? compareVersions(remote.version, BUNDLED_VERSION) > 0
+                     : compareVersions(remote.version, localVer) > 0);
+
+      if (needUpdate) {
+        setStatus("Downloading new update data… Please wait.");
+        setProgress(0);
+        var gameUrl = OTA_BASE + (remote.game || "game.html") + "?v=" + remote.version + "&t=" + Date.now();
+        fetchTextWithProgress(gameUrl, function (frac) { setProgress(frac); })
+          .then(function (html) {
+            setStatus("Finishing up…");
+            return saveGame(remote.version, html).then(function () {
+              setVersionLine("v" + remote.version + "  ·  updated");
+              bootHtml(html);
+            });
+          })
+          .catch(function () {
+            // Download failed mid-way — fall back to whatever we already have.
+            setStatus("Update failed, starting cached version…");
+            if (cachedHtml) bootHtml(cachedHtml); else bootBundled();
+          });
+        return;
+      }
+
+      // Up to date, offline, or nothing newer than the bundled build.
+      setStatus(cachedHtml ? "Starting…" : "Starting…");
+      setProgress(1);
+      if (cachedHtml) bootHtml(cachedHtml); else bootBundled();
+    }).catch(function () {
+      // Absolute last resort — never leave the user stuck on the overlay.
+      setStatus("Starting…");
+      bootBundled();
+    });
+  }
+
+  // Kick off once the DOM is ready.
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", start);
+  } else {
+    start();
+  }
+
+  // iOS Safari / WebView: block pinch + double-tap zoom on the shell too.
+  ["gesturestart", "gesturechange", "gestureend"].forEach(function (evt) {
+    document.addEventListener(evt, function (e) { e.preventDefault(); }, { passive: false });
+  });
+  document.addEventListener("dblclick", function (e) { e.preventDefault(); }, { passive: false });
+})();
+</script>
+</body>
+</html>
